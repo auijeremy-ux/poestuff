@@ -23,24 +23,31 @@ This tool works out how long every path will be once the files are in the ShareP
 ## One-time setup
 
 1. Copy the whole `LongPathShortener` folder to your computer, for example to `C:\CL\Tools\LongPathShortener`. Keep all the files together.
-2. Optional: right-click `Shorten Long Paths.bat`, choose **Send to > Desktop (create shortcut)**. You can drag zips onto the shortcut.
+2. Double-click `Create Desktop Shortcut.bat`. A **Long Path Shortener** icon appears on your desktop.
 3. If Windows shows a security warning when you run it, ask IT to unblock the folder.
 
 ## How to use it
 
 1. Save the client's zip file somewhere on your computer, for example Downloads. **Do not unzip it first.** If the client sent a folder, leave it where it is.
-2. Drag the zip file (or folder) onto `Shorten Long Paths.bat` or its shortcut. A black window opens.
-3. The window asks where the files will finally live:
+2. Open **Long Path Shortener** from the desktop. You can also drag the zip file or folder straight onto the desktop icon.
+3. **Step 1, the zip or folder.** Drag the zip file or folder onto the window, or click **Choose zip file...** or **Choose folder...**.
+4. **Step 2, the SharePoint folder.** This is where the files will finally live.
    - In File Explorer, open the matter's synced SharePoint folder.
    - Click in the address bar at the top and copy the path. It looks like `C:\Users\jsmith\CL\Matters - Documents\Smith Pty Ltd`.
-   - Right-click in the black window to paste it, then press Enter.
-   - Or type `B` and press Enter to pick the folder from a list.
-   - Next time, pressing Enter on its own reuses the last folder.
-4. **Step 1 is only a check.** Nothing is copied or renamed. When it finishes, the report opens in Excel. Have a look through it (see "Reading the report" below).
-5. Close Excel, go back to the black window and type `Y` to go ahead, or `N` to stop without changing anything.
-6. **Step 2** copies the files with their new names into `C:\CL\Out` and opens that folder.
+   - Paste it into the box, or click **Browse...** to pick the folder.
+   - The box remembers your recent folders. Click the arrow at its right to choose one.
+5. **Step 3, Check.** Nothing is copied or renamed yet. The list shows every file, with problems at the top in red (still too long) or yellow (skipped). Tick **Show only problems** to hide everything else, or type in **Search**. Double-click a row to see the full old and new paths.
+6. **Step 4, Apply changes.** The app copies (or unzips) the files with their new names into `C:\CL\Out` and offers to open that folder. **Stop** halts a job part way through.
 7. Upload the **contents** of the renamed folder (for example everything inside `C:\CL\Out\Smith docs`) into the SharePoint folder. Drag the contents, not the folder itself. The lengths were worked out for files sitting directly in the destination folder, so an extra folder level could push some paths over the limit again.
 8. Deal with anything in the "Needs attention" folder (see below). Keep the log file with the matter.
+
+If you change the zip, the SharePoint folder or a setting after checking, **Apply changes** greys out until you check again. That way you always apply exactly what you saw.
+
+**Open report** opens the full report in Excel. **Help** opens this guide.
+
+### The text version
+
+`Shorten Long Paths (text version).bat` does the same job without the app window. Drag a zip file or folder onto it and answer the questions in the black window. It is there as a backup, for example if the app will not open.
 
 ## What you get
 
@@ -50,8 +57,8 @@ Everything goes into `C:\CL\Out`. For a zip called `Smith docs.zip`:
 | --- | --- |
 | `Smith docs` | The renamed files. Upload the contents of this folder. |
 | `Smith docs - Needs attention` | Files that could not be shortened enough. Only there if there are any. |
-| `Smith docs - Dry run report <date time>.csv` | The report from the check in step 1. |
-| `Smith docs - Report <date time>.csv` | The report from step 2, showing what actually happened. |
+| `Smith docs - Dry run report <date time>.csv` | The report from Check. |
+| `Smith docs - Report <date time>.csv` | The report from Apply changes, showing what actually happened. |
 | `Smith docs - Log <date time>.csv` | The evidence log. Keep it with the matter. |
 
 If you run the same zip again, nothing is overwritten. The tool makes `Smith docs (2)` instead.
@@ -146,14 +153,20 @@ The tool cannot open password-protected files inside a zip. It lists them as **S
 
 ## Changing the settings
 
-The settings for the drag-and-drop launcher are at the top of `engine\Start-Interactive.ps1`. Open it in Notepad to change:
+Click **Settings...** in the app to change:
 
 - the output folder (default `C:\CL\Out`)
 - the path limit (default 218) and safety margin (default 10)
+- the abbreviations file
 - whether zips inside zips are unpacked (default yes)
 - whether a new zip of the renamed files is also made (default no)
+- whether Mac and Windows housekeeping files are kept (default no)
+
+**Restore defaults** puts everything back. Settings are saved for your Windows account on this computer only.
 
 Keep the limit at 218 even for matters with no spreadsheets. Someone may add one later.
+
+The text version has its own settings at the top of `engine\Start-Interactive.ps1`. Open that file in Notepad to change them.
 
 ## Editing the abbreviations
 
@@ -167,9 +180,11 @@ Keep the limit at 218 even for matters with no spreadsheets. Someone may add one
 
 | Problem | What to do |
 | --- | --- |
-| The window flashes and closes, or says scripts are disabled | Ask IT. A firm policy may be blocking PowerShell scripts. |
-| Dragging a file onto the .bat does nothing | Names containing `&` or `%` can confuse Windows. Double-click the .bat instead and drag the file into the black window. |
-| "The output folder is inside a OneDrive or SharePoint synced folder" | Anything written there starts uploading straight away, including files that still need attention. Type anything other than YES to stop, then use the default `C:\CL\Out`. |
+| The app does not open | Try `Shorten Long Paths (text version).bat`, which shows any error on screen. Ask IT, because a firm policy may be blocking PowerShell scripts. Any app errors are also written to `%LOCALAPPDATA%\LongPathShortener\app-errors.log`. |
+| Apply changes is greyed out | Click Check first. It also greys out if you change anything after checking. |
+| Dragging a file onto the text version does nothing | Names containing `&` or `%` can confuse Windows. Double-click the .bat instead and drag the file into the black window. |
+| "The output folder is inside a OneDrive or SharePoint synced folder" | Anything written there starts uploading straight away, including files that still need attention. Say no, then set the output folder back to `C:\CL\Out` in Settings. |
+| The app looks slightly blurry | This happens on screens with display scaling above 100%. It does not affect how the app works. |
 | "The destination folder path is already N characters long" | The SharePoint folder itself is too deep. Pick a shallower destination folder. |
 | "Stopped: the zip contents add up to ... GB" | The zip is unusually large once unpacked. Check with IT before raising the limit. |
 
@@ -181,10 +196,14 @@ Keep the limit at 218 even for matters with no spreadsheets. Someone may add one
 
 | File | Purpose |
 | --- | --- |
-| `Shorten Long Paths.bat` | Drag-and-drop launcher. Runs `powershell.exe -NoProfile -ExecutionPolicy Bypass` for its own process only. |
-| `engine\Start-Interactive.ps1` | The prompts the launcher shows. |
+| `Long Path Shortener.bat` | Opens the app window. Runs `powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden` for its own process only. |
+| `Create Desktop Shortcut.bat` | Runs `engine\New-DesktopShortcut.ps1` once to put a shortcut on the user's desktop (built-in WScript.Shell object). |
+| `Shorten Long Paths (text version).bat` | Console launcher, kept as a backup. Runs `engine\Start-Interactive.ps1`. |
+| `engine\Start-App.ps1` | The app window (Windows Forms, built into Windows). It only collects choices and shows results. |
+| `engine\LongPathShortener.App.psm1` | The app's non-visual support: settings, results table, filter, summary, and running the engine on a background runspace so the window stays responsive. |
+| `engine\Start-Interactive.ps1` | The prompts the text version shows. |
 | `engine\Shorten-LongPaths.ps1` | Command-line entry point. `Get-Help .\engine\Shorten-LongPaths.ps1 -Full` lists every parameter. |
-| `engine\LongPathShortener.psm1` | All the logic. |
+| `engine\LongPathShortener.psm1` | All the renaming, copying and safety logic. The app, the text version and the command line all use it. |
 | `Abbreviations.csv` | Sample abbreviations. |
 | `tests\` | Synthetic fixture generator and Pester tests. |
 
@@ -214,6 +233,8 @@ Without `-Apply` it is a dry run. Other switches: `-OutputFolder`, `-MaxPathLeng
 
 **Synced output warning.** The tool checks `%OneDrive%`, `%OneDriveCommercial%`, `%OneDriveConsumer%`, the synced library list under `HKCU\Software\SyncEngines\Providers\OneDrive` and `HKCU\Software\Microsoft\OneDrive\Accounts` (read only), and the destination folder itself. If the output folder is inside any of them, it asks the user to type YES.
 
+**App settings and logs.** The app keeps each user's settings in `%LOCALAPPDATA%\LongPathShortener\settings.json` and writes unexpected errors to `app-errors.log` in the same folder. Nothing else is stored.
+
 **Execution policy.** `-ExecutionPolicy Bypass` on the command line is overridden by a Group Policy that sets AllSigned. In that case, sign the `.ps1` and `.psm1` files with the firm's code signing certificate.
 
 **Tests.** Run from the `LongPathShortener` folder:
@@ -224,10 +245,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
 
 This uses the Pester 3.4 that ships with Windows PowerShell 5.1 and only synthetic data. The data is generated under `%TEMP%` and deleted afterwards. Set `LPS_KEEP_TEST_FILES=1` to keep it. The fixtures include a 12-level tree with names over 100 characters, reserved names, illegal characters, names that collide once shortened, dated file names, zips nested four deep, zip slip entries, an entry marked as encrypted and accented names.
 
-The tests were developed and passed on PowerShell 7.4 on Linux with Pester 3.4.0. That run cannot exercise the `\\?\` handling, reserved device names on NTFS, the registry checks or the .bat. **Run the tests once on a firm Windows 10 or 11 laptop before staff use the tool.**
+There are two test files. `LongPathShortener.Tests.ps1` covers the renaming, copying and safety logic. `LongPathShortener.App.Tests.ps1` covers the app's settings, results table, filter, background running and the Stop button. It also checks the app window script statically: it must parse, and every command and variable it uses must exist.
+
+The tests were developed and passed on PowerShell 7.4 on Linux with Pester 3.4.0. The scripts were also checked with PSScriptAnalyzer's compatibility rules against the Windows 10 PowerShell 5.1 profile. That Linux run cannot exercise the `\\?\` handling, reserved device names on NTFS, the registry checks, the .bat files or the app window itself. **Run the tests once on a firm Windows 10 or 11 laptop, and click through the app, before staff use it.**
 
 **Known limits.**
 
-- One zip or folder at a time. If several are dragged onto the .bat, only the first is used.
+- One zip or folder at a time. If several are dragged onto the app or the .bat, only the first is used.
+- The app window is not marked as high-DPI aware, so Windows stretches it on scaled displays and it can look slightly soft.
 - Only file contents and last-modified dates are carried over. Created dates, NTFS permissions and alternate data streams (such as the "downloaded from the internet" mark) are not.
 - Report and log dates are in the local time of the computer that ran the tool.

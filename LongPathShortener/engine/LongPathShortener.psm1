@@ -29,6 +29,8 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $script:IsWindowsOS = ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT)
 $script:Sep = [string][System.IO.Path]::DirectorySeparatorChar
 $script:Quiet = $false
+$script:Progress = $null          # optional shared hashtable used by the app window
+$script:CancelMessage = 'Stopped: cancelled by the user.'
 
 $script:MinFolderLength = 12      # rule 5 never cuts a folder name below this
 $script:MinFileStemLength = 12    # rule 6 never cuts a file name (without extension) below this
@@ -80,6 +82,18 @@ function Write-Info {
     param([string]$Message = '', [string]$Color = '')
     if ($script:Quiet) { return }
     if ($Color) { Write-Host $Message -ForegroundColor $Color } else { Write-Host $Message }
+}
+
+function Update-RunProgress {
+    # Reports progress to the app window (if there is one) and stops the run
+    # when the user has pressed Stop. Does nothing on the command line.
+    param([string]$Message = '', [long]$Done = -1, [long]$Total = -1)
+    $p = $script:Progress
+    if ($null -eq $p) { return }
+    if ($p['Cancel']) { throw $script:CancelMessage }
+    if ($Message) { $p['Message'] = $Message }
+    $p['Done'] = $Done
+    $p['Total'] = $Total
 }
 
 function Add-RunWarning {
@@ -209,6 +223,7 @@ function Copy-StreamWithHash {
         while ($true) {
             $n = $InputStream.Read($buffer, 0, $buffer.Length)
             if ($n -le 0) { break }
+            if ($null -ne $script:Progress -and $script:Progress['Cancel']) { throw $script:CancelMessage }
             $total += $n
             if ($MaxBytes -ge 0 -and $total -gt $MaxBytes) {
                 throw (New-Object System.IO.InvalidDataException -ArgumentList 'The entry holds more data than the zip says it should (possible zip bomb), so it was not extracted.')
@@ -678,6 +693,7 @@ function Add-ZipInventory {
     if ($BaseSegments.Count -gt 0) { $basePrefix = ($BaseSegments -join '\') + '\' }
 
     for ($i = 0; $i -lt $entries.Count; $i++) {
+        Update-RunProgress ('Reading the zip ({0} of {1} items)' -f ($i + 1), $entries.Count) ($i + 1) $entries.Count
         $e = $entries[$i]
         $raw = $e.FullName
 
@@ -756,6 +772,7 @@ function Add-FolderInventory {
     $stack.Push([pscustomobject]@{ Info = (New-Object System.IO.DirectoryInfo -ArgumentList $RootLong); Segs = [string[]]@() })
     while ($stack.Count -gt 0) {
         $cur = $stack.Pop()
+        Update-RunProgress ('Reading the folder ({0} items so far)' -f $Items.Count)
         try {
             $children = @($cur.Info.EnumerateFileSystemInfos() | Sort-Object -Property Name)
         } catch {
@@ -988,7 +1005,6 @@ function Get-OverLongLeaves {
 
 function Get-SoftRuleResult {
     param($Ctx, $Node, [string]$Rule)
-    $label = ''
     $result = $null
     switch ($Rule) {
         'Abbreviations' {
@@ -1344,6 +1360,7 @@ function Invoke-ApplyPlan {
         }
         $item = $leaf.Item
         $newRel = $names -join '\'
+        Update-RunProgress ('Copying files ({0} of {1})' -f ($done + 1), $ordered.Count) $done $ordered.Count
         [void][System.IO.Directory]::CreateDirectory((Get-ParentPhysicalPath $target))
         try {
             $r = Copy-ItemToTarget $Ctx $item $target
@@ -1355,8 +1372,10 @@ function Invoke-ApplyPlan {
                 })
         } catch {
             $msg = $_.Exception.Message
+            # A mismatched file is kept as evidence. Anything else half written is removed.
             if ($msg -like 'HASH MISMATCH*') { throw }
             try { if ([System.IO.File]::Exists($target)) { [System.IO.File]::Delete($target) } } catch { }
+            if ($msg -like 'Stopped:*') { throw }
             $item.Status = 'Error - ' + $msg
             $log.Add([pscustomobject]@{
                     OriginalRelativePath = $item.OrigRel; NewRelativePath = ''; SizeBytes = $item.Size
@@ -1467,6 +1486,26 @@ function Get-SyncRoot {
     return , $roots.ToArray()
 }
 
+function Get-SyncedFolderMatch {
+    <#
+    .SYNOPSIS
+        Returns the OneDrive or SharePoint synced folder that contains the
+        output folder, or an empty string if it is not inside one. The
+        destination folder counts as synced too.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$OutputFolder,
+        [string]$DestinationPrefix = ''
+    )
+    $outFull = Resolve-FullPath $OutputFolder
+    $prefix = $DestinationPrefix.Trim().Trim('"').Trim().Replace('/', '\')
+    while ($prefix.Length -gt 3 -and $prefix.EndsWith('\')) { $prefix = $prefix.Substring(0, $prefix.Length - 1) }
+    foreach ($r in @(Get-SyncRoot) + @($prefix)) {
+        if ($r -and (Test-PathUnder $outFull $r)) { return [string]$r }
+    }
+    return ''
+}
+
 function Confirm-SyncedOutput {
     param([string]$OutputFull, [string]$SyncRoot)
     Write-Warning ("The output folder {0} is inside a OneDrive or SharePoint synced folder ({1}). Anything written there starts uploading straight away, including files that still need attention." -f $OutputFull, $SyncRoot)
@@ -1524,10 +1563,13 @@ function Invoke-PathShortener {
         [ValidateRange(0.0, 100000.0)][double]$MaxTotalSizeGB = 20,
         [switch]$AllowSyncedOutput,
         [switch]$IncludeSystemFiles,
-        [switch]$Quiet
+        [switch]$Quiet,
+        [hashtable]$Progress = $null
     )
 
     $script:Quiet = [bool]$Quiet
+    $script:Progress = $Progress
+    Update-RunProgress 'Checking the output folder...'
     $stamp = (Get-Date).ToString('yyyy-MM-dd HHmmss', [System.Globalization.CultureInfo]::InvariantCulture)
 
     # Destination prefix: the final synced SharePoint folder.
@@ -1559,11 +1601,8 @@ function Invoke-PathShortener {
     }
     $outLong = ConvertTo-LongPath $outFull
 
-    $outputIsSynced = $false
-    $syncHit = ''
-    foreach ($r in @(Get-SyncRoot) + @($prefix)) {
-        if ($r -and (Test-PathUnder $outFull $r)) { $outputIsSynced = $true; $syncHit = $r; break }
-    }
+    $syncHit = Get-SyncedFolderMatch -OutputFolder $outFull -DestinationPrefix $prefix
+    $outputIsSynced = [bool]$syncHit
     if ($outputIsSynced -and -not $AllowSyncedOutput) { Confirm-SyncedOutput $outFull $syncHit }
 
     [void][System.IO.Directory]::CreateDirectory($outLong)
@@ -1632,6 +1671,7 @@ function Invoke-PathShortener {
         }
 
         Write-Info 'Working out new names...'
+        Update-RunProgress 'Working out new names...'
         New-RenamePlan $ctx
 
         if ($Apply) {
@@ -1654,6 +1694,7 @@ function Invoke-PathShortener {
                 if ($CreateZip) {
                     $ctx.ZipLong = $z
                     Write-Info 'Creating the new zip...'
+                    Update-RunProgress 'Creating the new zip...'
                     New-OutputZip $ctx
                     $zipFull = ConvertFrom-LongPath $z
                 }
@@ -1667,6 +1708,7 @@ function Invoke-PathShortener {
             $reportLong = Join-PhysicalPath $outLong @(('{0} - Dry run report {1}.csv' -f $jobBase, $stamp))
         }
 
+        Update-RunProgress 'Writing the report...'
         $rows = Get-ReportRows $ctx
         Export-CsvFile $reportLong @('OriginalPath', 'NewPath', 'OriginalLength', 'NewLength', 'RulesApplied', 'Status') $rows
         $reportFull = ConvertFrom-LongPath $reportLong
@@ -1734,4 +1776,4 @@ function Invoke-PathShortener {
     }
 }
 
-Export-ModuleMember -Function Invoke-PathShortener
+Export-ModuleMember -Function Invoke-PathShortener, Get-SyncedFolderMatch

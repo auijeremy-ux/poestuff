@@ -36,7 +36,8 @@ if ($PesterPath) {
 
 Write-Host ('PowerShell {0} on {1}, Pester {2}' -f $PSVersionTable.PSVersion, [System.Environment]::OSVersion.VersionString, (Get-Module Pester).Version)
 
-$result = Invoke-Pester -Script (Join-Path $here 'LongPathShortener.Tests.ps1') -PassThru
+# Runs every *.Tests.ps1 file in this folder.
+$result = Invoke-Pester -Script $here -PassThru
 Write-Host ''
 Write-Host ('Passed: {0}  Failed: {1}  Total: {2}' -f $result.PassedCount, $result.FailedCount, $result.TotalCount)
 exit $result.FailedCount
