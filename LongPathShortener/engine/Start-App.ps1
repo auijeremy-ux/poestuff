@@ -97,6 +97,7 @@ $state = @{
     OutputPath     = ''
     NextText       = ''
     TickErrorShown = $false
+    Budget         = 0       # the limit used by the last check or apply
 }
 $colorCache = @{}
 
@@ -226,7 +227,7 @@ try {
     Add-UiColumn $inputs 'AutoSize'
     Add-UiColumn $inputs 'Percent' 100
     Add-UiColumn $inputs 'AutoSize'
-    foreach ($i in 1..4) { Add-UiRow $inputs 'AutoSize' }
+    foreach ($i in 1..5) { Add-UiRow $inputs 'AutoSize' }
 
     $lblSource = New-UiLabel '1.  Client zip file or folder' $fontBold
     $txtSource = New-Object System.Windows.Forms.TextBox
@@ -260,6 +261,12 @@ try {
     $inputs.Controls.Add($btnDest, 2, 2)
     $inputs.Controls.Add($lblDestHint, 1, 3)
     $inputs.SetColumnSpan($lblDestHint, 2)
+    # The limit in use, always visible, so a changed setting is never a surprise.
+    $lblLimit = New-UiLabel '' $fontBold $colorHint
+    $lblLimit.Margin = New-Object System.Windows.Forms.Padding(3, 0, 3, 8)
+    $lblLimit.MaximumSize = New-Object System.Drawing.Size(620, 0)
+    $inputs.Controls.Add($lblLimit, 1, 4)
+    $inputs.SetColumnSpan($lblLimit, 2)
     $main.Controls.Add($inputs, 0, 2)
 
     # Steps 3 and 4 -------------------------------------------------------------
@@ -458,6 +465,13 @@ try {
         $lblNext.MaximumSize = New-Object System.Drawing.Size($w, 0)
         $lblSourceHint.MaximumSize = New-Object System.Drawing.Size([Math]::Max(300, $w - 460), 0)
         $lblDestHint.MaximumSize = New-Object System.Drawing.Size([Math]::Max(300, $w - 460), 0)
+        $lblLimit.MaximumSize = New-Object System.Drawing.Size([Math]::Max(300, $w - 460), 0)
+    }
+
+    function Update-LimitLabel {
+        $lt = Get-LimitText $settings
+        $lblLimit.Text = $lt.Text
+        if ($lt.IsStandard) { $lblLimit.ForeColor = $colorHint } else { $lblLimit.ForeColor = $colorWarn }
     }
 
     function Open-InExplorer {
@@ -543,6 +557,7 @@ try {
         $state.NextText = $sum.Next
         $lblNext.Text = $sum.Next
         $state.ReportPath = [string]$Result.ReportPath
+        $state.Budget = [int]$Result.Budget
 
         if ($state.Mode -eq 'Check') {
             $state.CheckedKey = $state.RunKey
@@ -647,19 +662,27 @@ try {
         $lblOutHint.Margin = New-Object System.Windows.Forms.Padding(3, 0, 3, 8)
 
         $numMax = New-Object System.Windows.Forms.NumericUpDown
-        $numMax.Minimum = 50
-        $numMax.Maximum = 400
+        $range = Get-LimitRange
+        $numMax.Minimum = $range.Min
+        $numMax.Maximum = $range.Max
         $numMax.Width = 80
-        $numMax.Value = [decimal]$settings.MaxPathLength
+        $numMax.Value = [decimal][Math]::Min($range.Max, [Math]::Max($range.Min, [int]$settings.MaxPathLength))
         $flowMax = New-UiFlow
         $flowMax.Controls.Add($numMax)
         $flowMax.Controls.Add((New-UiLabel 'characters. Excel stops at 218, Word at 259.' $null $colorHint))
 
         $numMargin = New-Object System.Windows.Forms.NumericUpDown
         $numMargin.Minimum = 0
-        $numMargin.Maximum = 100
+        $numMargin.Maximum = $range.MarginMax
         $numMargin.Width = 80
-        $numMargin.Value = [decimal]$settings.SafetyMargin
+        $numMargin.Value = [decimal][Math]::Min($range.MarginMax, [Math]::Max(0, [int]$settings.SafetyMargin))
+        # Scrolling over a number box must not quietly change it.
+        $noWheel = {
+            param($ctl, $e)
+            if ($e -is [System.Windows.Forms.HandledMouseEventArgs]) { $e.Handled = $true }
+        }
+        $numMax.Add_MouseWheel($noWheel)
+        $numMargin.Add_MouseWheel($noWheel)
         $flowMargin = New-UiFlow
         $flowMargin.Controls.Add($numMargin)
         $flowMargin.Controls.Add((New-UiLabel 'characters kept spare below the limit.' $null $colorHint))
@@ -761,6 +784,14 @@ try {
                 if ($problem) {
                     [void](Show-Message $problem 'Settings' ([System.Windows.Forms.MessageBoxIcon]::Warning))
                     $e.Cancel = $true
+                    return
+                }
+                $limit = [int]$numMax.Value
+                if ($limit -lt 200 -or $limit -gt 259) {
+                    $question = ("You have set the longest path allowed to {0} characters. Excel's limit is 218 and Word's is 259." +
+                        "`n`nA lower number flags files that would open fine. A higher number lets through spreadsheets Excel cannot open.`n`nKeep {0}?") -f $limit
+                    $answer = Show-Message $question 'Settings' ([System.Windows.Forms.MessageBoxIcon]::Warning) ([System.Windows.Forms.MessageBoxButtons]::YesNo)
+                    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { $e.Cancel = $true }
                 }
             })
 
@@ -843,7 +874,7 @@ try {
                 }
             }
         })
-    $btnSettings.Add_Click({ Invoke-UiAction { Show-SettingsDialog; Update-Buttons } })
+    $btnSettings.Add_Click({ Invoke-UiAction { Show-SettingsDialog; Update-LimitLabel; Update-Buttons } })
     $btnHelp.Add_Click({
             Invoke-UiAction {
                 if (Test-Path -LiteralPath $readmePath) {
@@ -883,8 +914,8 @@ try {
                 $row = $grid.Rows[$e.RowIndex].DataBoundItem.Row
                 $newFull = [string]$row['NewFull']
                 if ($newFull -eq '') { $newFull = '(not copied)' }
-                $text = "Status: {0}`n`nOriginal path ({1} characters):`n{2}`n`nNew path ({3} characters):`n{4}`n`nWhat changed:`n{5}" -f `
-                    $row['Status'], $row['OriginalLength'], $row['OriginalFull'], $row['NewLength'], $newFull, $row['Changes']
+                $text = "Status: {0}`n`nLimit used: {6} characters`n`nOriginal path ({1} characters):`n{2}`n`nNew path ({3} characters):`n{4}`n`nWhat changed:`n{5}" -f `
+                    $row['Status'], $row['OriginalLength'], $row['OriginalFull'], $row['NewLength'], $newFull, $row['Changes'], $state.Budget
                 [void](Show-Message $text 'File details')
             }
         })
@@ -917,6 +948,7 @@ try {
     $form.Add_Shown({
             Invoke-UiAction {
                 Update-LabelWidths
+                Update-LimitLabel
                 Update-DestinationList
                 if ($Source) { Set-Source $Source } else { [void]$txtSource.Focus() }
                 Update-Buttons

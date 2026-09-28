@@ -184,6 +184,8 @@ Click **Settings...** in the app to change:
 
 **Restore defaults** puts everything back. Settings are saved for your Windows account on this computer only.
 
+The main window always shows the limit in use, under the SharePoint folder box. If it is not Excel's standard 218, that line turns orange and says so. The limit can be set between 150 and 400, and the app asks you to confirm anything below 200 or above 259. Scrolling the mouse wheel over the number boxes does not change them.
+
 Keep the limit at 218 even for matters with no spreadsheets. Someone may add one later.
 
 The text version has its own settings at the top of `engine\Start-Interactive.ps1`. Open that file in Notepad to change them.
@@ -202,6 +204,7 @@ The text version has its own settings at the top of `engine\Start-Interactive.ps
 | --- | --- |
 | The app does not open | Try `Shorten Long Paths (text version).bat`, which shows any error on screen. Ask IT, because a firm policy may be blocking PowerShell scripts. Any app errors are also written to `%LOCALAPPDATA%\LongPathShortener\app-errors.log`. |
 | Apply changes is greyed out | Click Check first. It also greys out if you change anything after checking. |
+| Almost every file says "Needs manual attention", even short ones | Look at the "Path limit" line under the SharePoint folder box. If it is not 208 characters (218 less 10), open Settings and click Restore defaults. Double-clicking a file also shows the limit that was used. |
 | Dragging a file onto the text version does nothing | Names containing `&` or `%` can confuse Windows. Double-click the .bat instead and drag the file into the black window. |
 | "The output folder is inside a OneDrive or SharePoint synced folder" | Anything written there starts uploading straight away, including files that still need attention. Say no, then set the output folder back to `C:\CL\Out` in Settings. |
 | The app looks slightly blurry | This happens on screens with display scaling above 100%. It does not affect how the app works. |

@@ -89,6 +89,28 @@ Describe 'App settings' {
         (Read-AppSettings $settingsFile $toolRoot).UnpackNestedZips | Should Be $true
     }
 
+    It 'resets a path limit or margin that looks like a mistake to the standard values' {
+        [System.IO.File]::WriteAllText($settingsFile, '{ "MaxPathLength": 70, "SafetyMargin": 10 }')
+        (Read-AppSettings $settingsFile $toolRoot).MaxPathLength | Should Be 218
+        [System.IO.File]::WriteAllText($settingsFile, '{ "MaxPathLength": 218, "SafetyMargin": 60 }')
+        (Read-AppSettings $settingsFile $toolRoot).SafetyMargin | Should Be 10
+        [System.IO.File]::WriteAllText($settingsFile, '{ "MaxPathLength": 259, "SafetyMargin": 5 }')
+        $r = Read-AppSettings $settingsFile $toolRoot
+        $r.MaxPathLength | Should Be 259
+        $r.SafetyMargin | Should Be 5
+    }
+
+    It 'describes the limit in use and says when it is not the standard one' {
+        $d = Get-LimitText (Get-DefaultAppSettings $toolRoot)
+        $d.IsStandard | Should Be $true
+        $d.Text | Should Be 'Path limit: 208 characters (218 less a 10 character safety margin).'
+        $low = Get-DefaultAppSettings $toolRoot
+        $low.MaxPathLength = 170
+        $l = Get-LimitText $low
+        $l.IsStandard | Should Be $false
+        $l.Text | Should Match 'lower than Excel'
+    }
+
     It 'ignores numbers that are out of range' {
         [System.IO.File]::WriteAllText($settingsFile, '{ "MaxPathLength": 5, "SafetyMargin": 500 }')
         $r = Read-AppSettings $settingsFile $toolRoot
@@ -161,18 +183,18 @@ Describe 'Results table and filter' {
 Describe 'Summary text' {
     It 'describes a check with problems' {
         $res = [pscustomobject]@{
-            Mode = 'DryRun'; FilesProcessed = 10; FilesRenamed = 3; FilesFlagged = 1; ItemsSkipped = 2; ItemsRejected = 0; Errors = 0
+            Mode = 'DryRun'; Budget = 208; FilesProcessed = 10; FilesRenamed = 3; FilesFlagged = 1; ItemsSkipped = 2; ItemsRejected = 0; Errors = 0
             Rows = @(1..6 | ForEach-Object { [pscustomobject]@{ Status = 'OK' } })
         }
         $s = Get-ResultSummary $res
-        $s.Text | Should Be 'Checked 10 files: 3 will be renamed, 6 already fit, 1 still too long (need attention), 2 skipped.'
+        $s.Text | Should Be 'Checked 10 files against a 208 character limit: 3 will be renamed, 6 already fit, 1 still too long (need attention), 2 skipped.'
         $s.Level | Should Be 'Warning'
         $s.Next | Should Match 'Nothing has been copied yet'
     }
 
     It 'describes a clean finished apply' {
         $res = [pscustomobject]@{
-            Mode = 'Apply'; FilesProcessed = 5; FilesRenamed = 2; FilesFlagged = 0; ItemsSkipped = 0; ItemsRejected = 0; Errors = 0
+            Mode = 'Apply'; Budget = 208; FilesProcessed = 5; FilesRenamed = 2; FilesFlagged = 0; ItemsSkipped = 0; ItemsRejected = 0; Errors = 0
             Rows = @()
         }
         $s = Get-ResultSummary $res

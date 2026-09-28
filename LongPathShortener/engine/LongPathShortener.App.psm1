@@ -14,6 +14,13 @@
 
 Set-StrictMode -Version 2.0
 
+# Sensible ranges for the path limit and safety margin. A saved value outside
+# them is treated as a mistake and the standard value is used instead.
+$script:StandardLimit = 218
+$script:LimitMin = 150
+$script:LimitMax = 400
+$script:MarginMax = 50
+
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
@@ -52,8 +59,8 @@ function Read-AppSettings {
     if ($null -ne $saved) {
         $names = @($saved.PSObject.Properties | ForEach-Object { $_.Name })
         try { if ($names -contains 'OutputFolder' -and $saved.OutputFolder) { $s.OutputFolder = [string]$saved.OutputFolder } } catch { }
-        try { if ($names -contains 'MaxPathLength') { $v = [int]$saved.MaxPathLength; if ($v -ge 50 -and $v -le 400) { $s.MaxPathLength = $v } } } catch { }
-        try { if ($names -contains 'SafetyMargin') { $v = [int]$saved.SafetyMargin; if ($v -ge 0 -and $v -le 100) { $s.SafetyMargin = $v } } } catch { }
+        try { if ($names -contains 'MaxPathLength') { $v = [int]$saved.MaxPathLength; if ($v -ge $script:LimitMin -and $v -le $script:LimitMax) { $s.MaxPathLength = $v } } } catch { }
+        try { if ($names -contains 'SafetyMargin') { $v = [int]$saved.SafetyMargin; if ($v -ge 0 -and $v -le $script:MarginMax) { $s.SafetyMargin = $v } } } catch { }
         # The older ExpandNestedZips setting is ignored on purpose: zips inside
         # are now kept as zips unless the user turns unpacking back on.
         try { if ($names -contains 'UnpackNestedZips') { $s.UnpackNestedZips = [bool]$saved.UnpackNestedZips } } catch { }
@@ -91,6 +98,25 @@ function Add-RecentDestination {
         $list.Add($r)
     }
     $Settings.RecentDestinations = $list.ToArray()
+}
+
+function Get-LimitText {
+    # One line for the main window saying which limit is in use, and whether it
+    # is the standard one (Excel's 218).
+    param($Settings)
+    $max = [int]$Settings.MaxPathLength
+    $margin = [int]$Settings.SafetyMargin
+    $text = 'Path limit: {0} characters ({1} less a {2} character safety margin).' -f ($max - $margin), $max, $margin
+    if ($max -lt $script:StandardLimit) {
+        $text += (' This is lower than Excel''s {0}, so files that would open fine get flagged. Change it in Settings.' -f $script:StandardLimit)
+    } elseif ($max -gt $script:StandardLimit) {
+        $text += (' This is higher than Excel''s {0}, so some spreadsheets may not open. Change it in Settings.' -f $script:StandardLimit)
+    }
+    return [pscustomobject]@{ Text = $text; IsStandard = ($max -eq $script:StandardLimit) }
+}
+
+function Get-LimitRange {
+    return [pscustomobject]@{ Standard = $script:StandardLimit; Min = $script:LimitMin; Max = $script:LimitMax; MarginMax = $script:MarginMax }
 }
 
 # ---------------------------------------------------------------------------
@@ -218,7 +244,7 @@ function Get-ResultSummary {
             $text = 'No files were found to copy.'
             $next = 'Check that you chose the right zip file or folder.'
         } else {
-            $text = 'Checked {0} files: {1} will be renamed, {2} already fit{3}.' -f $files, $renamed, $ok, $tail
+            $text = 'Checked {0} files against a {4} character limit: {1} will be renamed, {2} already fit{3}.' -f $files, $renamed, $ok, $tail, $Result.Budget
             $next = 'Nothing has been copied yet. Look through the list, then click Apply changes.'
             if ($flagged -gt 0) { $next = 'Nothing has been copied yet. Files still too long are marked in red and will need sorting out by hand. When ready, click Apply changes.' }
         }
@@ -286,4 +312,5 @@ function Complete-ShortenerJob {
 
 Export-ModuleMember -Function Get-AppSettingsPath, Get-DefaultAppSettings, Read-AppSettings, Save-AppSettings,
     Add-RecentDestination, Get-StatusRank, Get-StatusRgb, Get-DisplayPath, ConvertTo-ResultTable,
-    ConvertTo-RowFilterLiteral, Get-ResultFilter, Get-ResultSummary, Start-ShortenerJob, Complete-ShortenerJob
+    ConvertTo-RowFilterLiteral, Get-ResultFilter, Get-ResultSummary, Start-ShortenerJob, Complete-ShortenerJob,
+    Get-LimitText, Get-LimitRange
