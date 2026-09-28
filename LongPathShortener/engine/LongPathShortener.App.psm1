@@ -30,7 +30,7 @@ function Get-DefaultAppSettings {
         OutputFolder       = 'C:\CL\Out'
         MaxPathLength      = 218
         SafetyMargin       = 10
-        ExpandNestedZips   = $true
+        UnpackNestedZips   = $false
         CreateZip          = $false
         IncludeSystemFiles = $false
         AbbreviationsCsv   = (Join-Path $ToolRoot 'Abbreviations.csv')
@@ -54,7 +54,9 @@ function Read-AppSettings {
         try { if ($names -contains 'OutputFolder' -and $saved.OutputFolder) { $s.OutputFolder = [string]$saved.OutputFolder } } catch { }
         try { if ($names -contains 'MaxPathLength') { $v = [int]$saved.MaxPathLength; if ($v -ge 50 -and $v -le 400) { $s.MaxPathLength = $v } } } catch { }
         try { if ($names -contains 'SafetyMargin') { $v = [int]$saved.SafetyMargin; if ($v -ge 0 -and $v -le 100) { $s.SafetyMargin = $v } } } catch { }
-        try { if ($names -contains 'ExpandNestedZips') { $s.ExpandNestedZips = [bool]$saved.ExpandNestedZips } } catch { }
+        # The older ExpandNestedZips setting is ignored on purpose: zips inside
+        # are now kept as zips unless the user turns unpacking back on.
+        try { if ($names -contains 'UnpackNestedZips') { $s.UnpackNestedZips = [bool]$saved.UnpackNestedZips } } catch { }
         try { if ($names -contains 'CreateZip') { $s.CreateZip = [bool]$saved.CreateZip } } catch { }
         try { if ($names -contains 'IncludeSystemFiles') { $s.IncludeSystemFiles = [bool]$saved.IncludeSystemFiles } } catch { }
         try { if ($names -contains 'AbbreviationsCsv' -and $null -ne $saved.AbbreviationsCsv) { $s.AbbreviationsCsv = [string]$saved.AbbreviationsCsv } } catch { }
@@ -210,7 +212,7 @@ function Get-ResultSummary {
     if ($Result.Mode -eq 'Apply') {
         $text = 'Done. {0} files processed: {1} renamed{2}.' -f $files, $renamed, $tail
         $next = 'Upload the contents of the output folder to SharePoint. Keep the evidence log with the matter.'
-        if ($flagged -gt 0) { $next = 'Upload the contents of the output folder to SharePoint. Sort out the files in the Needs attention folder by hand.' }
+        if ($flagged -gt 0) { $next = 'Upload the contents of the output folder to SharePoint. Sort out the files marked in red by hand (see Help).' }
     } else {
         if ($files -eq 0) {
             $text = 'No files were found to copy.'
@@ -218,7 +220,7 @@ function Get-ResultSummary {
         } else {
             $text = 'Checked {0} files: {1} will be renamed, {2} already fit{3}.' -f $files, $renamed, $ok, $tail
             $next = 'Nothing has been copied yet. Look through the list, then click Apply changes.'
-            if ($flagged -gt 0) { $next = 'Nothing has been copied yet. Files still too long will go to a separate Needs attention folder. When ready, click Apply changes.' }
+            if ($flagged -gt 0) { $next = 'Nothing has been copied yet. Files still too long are marked in red and will need sorting out by hand. When ready, click Apply changes.' }
         }
     }
     return [pscustomobject]@{ Text = $text; Next = $next; Level = $level }

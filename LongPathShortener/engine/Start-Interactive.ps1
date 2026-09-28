@@ -20,7 +20,9 @@ param(
 $OutputFolder = 'C:\CL\Out'
 $MaxPathLength = 218
 $SafetyMargin = 10
-$ExpandNestedZips = $true
+# Zips found inside the client's zip or folder stay as zips, with shorter
+# names inside where needed. Set to $true to unpack them into folders instead.
+$UnpackNestedZips = $false
 $CreateZip = $false
 $AbbreviationsCsv = Join-Path (Split-Path -Parent $PSScriptRoot) 'Abbreviations.csv'
 # ---------------------------------------------------------------------------
@@ -99,7 +101,7 @@ try {
         OutputFolder      = $OutputFolder
         MaxPathLength     = $MaxPathLength
         SafetyMargin      = $SafetyMargin
-        ExpandNestedZips  = [bool]$ExpandNestedZips
+        NestedZips        = $(if ($UnpackNestedZips) { 'Expand' } else { 'Keep' })
     }
     if ($AbbreviationsCsv -and (Test-Path -LiteralPath $AbbreviationsCsv)) { $common.AbbreviationsCsv = $AbbreviationsCsv }
 
@@ -117,8 +119,8 @@ try {
     Write-Host '  In the report, NewPath shows where each file will end up and Status shows'
     Write-Host '  what will happen to it. Close Excel when you have finished looking.'
     if ($dry.FilesFlagged -gt 0) {
-        Write-Host ('  {0} file(s) cannot be shortened enough. They will be copied to a separate' -f $dry.FilesFlagged) -ForegroundColor Yellow
-        Write-Host '  "Needs attention" folder for you to sort out by hand (see the README).' -ForegroundColor Yellow
+        Write-Host ('  {0} file(s) cannot be shortened enough (Status "Needs manual attention").' -f $dry.FilesFlagged) -ForegroundColor Yellow
+        Write-Host '  They will need sorting out by hand (see the README).' -ForegroundColor Yellow
     }
     Write-Host ''
 

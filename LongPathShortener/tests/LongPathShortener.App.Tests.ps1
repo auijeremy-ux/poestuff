@@ -55,7 +55,7 @@ Describe 'App settings' {
         $s.OutputFolder | Should Be 'C:\CL\Out'
         $s.MaxPathLength | Should Be 218
         $s.SafetyMargin | Should Be 10
-        $s.ExpandNestedZips | Should Be $true
+        $s.UnpackNestedZips | Should Be $false
         $s.CreateZip | Should Be $false
         $s.AbbreviationsCsv | Should Be (Join-Path $toolRoot 'Abbreviations.csv')
         @($s.RecentDestinations).Count | Should Be 0
@@ -80,6 +80,13 @@ Describe 'App settings' {
         [System.IO.File]::WriteAllText($settingsFile, 'this is { not json')
         $r = Read-AppSettings $settingsFile $toolRoot
         $r.MaxPathLength | Should Be 218
+    }
+
+    It 'ignores the old unpack setting, so zips inside are kept as zips' {
+        [System.IO.File]::WriteAllText($settingsFile, '{ "ExpandNestedZips": true }')
+        (Read-AppSettings $settingsFile $toolRoot).UnpackNestedZips | Should Be $false
+        [System.IO.File]::WriteAllText($settingsFile, '{ "UnpackNestedZips": true }')
+        (Read-AppSettings $settingsFile $toolRoot).UnpackNestedZips | Should Be $true
     }
 
     It 'ignores numbers that are out of range' {
@@ -223,7 +230,7 @@ Describe 'Running in the background' {
         $logs.Count | Should Be 1
         $copied = @(Get-ChildItem -LiteralPath ($out + $sep + 'Source') -Recurse -File)
         $copied.Count | Should BeLessThan 20
-        $logRows = @(Import-Csv -LiteralPath $logs[0] | Where-Object { $_.Result -eq 'Copied' })
+        $logRows = @(Import-Csv -LiteralPath $logs[0] | Where-Object { $_.Result -like 'Copied*' -or $_.Result -like 'Zip rebuilt*' })
         $logRows.Count | Should Be $copied.Count
     }
 }

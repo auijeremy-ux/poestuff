@@ -607,6 +607,9 @@ function New-InventoryItem {
         Node         = $null
         Hash         = ''
         IsZipTooDeep = $false
+        InnerZipPath  = ''          # for a zip inside the source: where its bytes can be read
+        UnsafeEntries = 0           # zip slip entries found inside it
+        InnerLongest  = 0           # for a zip kept untouched: its longest path inside
     }
 }
 
@@ -647,6 +650,23 @@ function Expand-NestedZip {
     }
     $inner = New-Object System.Collections.Generic.List[object]
     Add-ZipInventory -Ctx $Ctx -ZipLongPath $zipLong -BaseSegments $Item.Segments -Level $Level -Items $inner
+    $Item.InnerZipPath = $zipLong
+    $Item.UnsafeEntries = @($inner | Where-Object { $_.Kind -eq 'Skipped' -and $_.Status -like 'Rejected*' }).Count
+
+    if ($Ctx.KeepZips -and @($inner | Where-Object { $_.Kind -eq 'Skipped' -and $_.Status -eq 'Skipped - encrypted' }).Count -gt 0) {
+        # A zip cannot be rebuilt without losing its password-protected files,
+        # so this one is kept exactly as it is and only its own name can change.
+        $Item.Note = 'This zip has password-protected files inside, so it was kept exactly as it is and the names inside were not changed'
+        $longest = 0
+        $baseLen = $Item.OrigRel.Length + 1
+        foreach ($i in $inner) {
+            if ($i.Kind -ne 'Skipped' -and ($i.OrigRel.Length - $baseLen) -gt $longest) { $longest = $i.OrigRel.Length - $baseLen }
+        }
+        $Item.InnerLongest = $longest
+        $Items.Add($Item)
+        return
+    }
+
     $Item.Kind = 'Container'
     $Items.Add($Item)
     $Items.AddRange($inner)
@@ -655,7 +675,7 @@ function Expand-NestedZip {
 function Add-FileOrNestedZip {
     param($Ctx, $Item, [int]$ContainerLevel, $Items)
     $name = $Item.Segments[$Item.Segments.Count - 1]
-    if ($Ctx.ExpandNestedZips -and $name -match '\.zip$') {
+    if ($name -match '\.zip$') {
         $level = $ContainerLevel + 1
         if ($level -le $script:MaxNestedZipLevel) {
             try {
@@ -865,6 +885,7 @@ function New-PlanNode {
         Item       = $null
         DirItem    = $null
         IsContainer = $false
+        InContainer = $null    # the nearest zip (inside the source) this node sits in
         Flagged    = $false
     }
 }
@@ -962,18 +983,28 @@ function Build-PlanTree {
 
 function Initialize-NodeName {
     # Rule 1 for every name, plus the 240 character cap on any single name.
-    param($Node)
+    param($Ctx, $Node)
     $clean = Get-CleanName $Node.OrigName
     $name = $clean.Name
     foreach ($c in $clean.Changes) { Add-NodeRule $Node $c }
+    $zipExt = ''
     if ($Node.IsContainer) {
-        $name = ($name -replace '\.zip$', '').TrimEnd(' ', '.')
+        $m = [regex]::Match($name, '\.zip$', 'IgnoreCase')
+        if ($m.Success) { $zipExt = $m.Value; $name = $name.Substring(0, $m.Index) }
+        $name = $name.TrimEnd(' ', '.')
         if ($name -eq '') { $name = '_' }
-        Add-NodeRule $Node 'Nested zip expanded'
+        if ($Ctx.KeepZips) {
+            # Kept as a zip. Its name counts, with .zip, as a folder in the paths
+            # inside it, which is where they would land if it were unzipped here.
+            if ($zipExt -eq '') { $zipExt = '.zip' }
+        } else {
+            $zipExt = ''
+            Add-NodeRule $Node 'Nested zip expanded'
+        }
     }
     if ($Node.IsDir) {
         $Node.Base = $name
-        $Node.Ext = ''
+        $Node.Ext = $zipExt
     } else {
         $parts = Split-FileName $name
         $Node.Base = $parts.Stem
@@ -1157,6 +1188,49 @@ function Resolve-NameCollision {
     }
 }
 
+function Set-ContainerLink {
+    # Records for every node the nearest zip (found inside the source) it sits in.
+    param($Root)
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push(@($Root, $null))
+    while ($stack.Count -gt 0) {
+        $pair = $stack.Pop()
+        foreach ($c in $pair[0].Children) {
+            $c.InContainer = $pair[1]
+            if ($c.IsContainer) { $stack.Push(@($c, $c)) }
+            elseif ($c.IsDir) { $stack.Push(@($c, $pair[1])) }
+        }
+    }
+}
+
+function Test-InsideKeptZip {
+    # True for a node that will be written inside a zip kept as a zip.
+    param($Ctx, $Node)
+    return ([bool]$Ctx.KeepZips -and $null -ne $Node.InContainer)
+}
+
+function Test-ContainerRebuild {
+    # A zip kept as a zip only needs rebuilding if a name inside it changes, a
+    # zip inside it needs rebuilding, or it holds unsafe (zip slip) entries.
+    # Otherwise it is copied byte for byte.
+    param($Ctx, $Node)
+    if ($Ctx.RebuildCache.ContainsKey($Node.Order)) { return [bool]$Ctx.RebuildCache[$Node.Order] }
+    $needs = ($null -ne $Node.DirItem -and $Node.DirItem.UnsafeEntries -gt 0)
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    foreach ($c in $Node.Children) { $stack.Push($c) }
+    while (-not $needs -and $stack.Count -gt 0) {
+        $n = $stack.Pop()
+        if (-not [string]::Equals((Get-NodeName $n), $n.OrigName, [System.StringComparison]::Ordinal)) { $needs = $true; break }
+        if ($n.IsContainer) {
+            if (Test-ContainerRebuild $Ctx $n) { $needs = $true; break }
+            continue
+        }
+        foreach ($c in $n.Children) { $stack.Push($c) }
+    }
+    $Ctx.RebuildCache[$Node.Order] = $needs
+    return $needs
+}
+
 function Invoke-RenameRule {
     # Runs rules 1 to 6 and the duplicate check over a freshly built tree.
     param($Ctx)
@@ -1169,9 +1243,10 @@ function Invoke-RenameRule {
         if (-not $n.IsRoot) { $all.Add($n) }
         foreach ($c in $n.Children) { $stack.Push($c) }
     }
-    $leaves = @($all | Where-Object { (-not $_.IsDir) -or $_.Children.Count -eq 0 } | Sort-Object -Property Order)
+    Set-ContainerLink $root
+    $leaves = @($all | Where-Object { (-not $_.IsDir) -or $_.Children.Count -eq 0 -or ($Ctx.KeepZips -and $_.IsContainer) } | Sort-Object -Property Order)
 
-    foreach ($n in $all) { Initialize-NodeName $n }
+    foreach ($n in $all) { Initialize-NodeName $Ctx $n }
     Resolve-NameCollision $root
 
     foreach ($rule in 'Abbreviations', 'Repeated parent name removed', 'Filler words removed') {
@@ -1212,7 +1287,7 @@ function New-RenamePlan {
 
 function Get-StatusRank {
     param([string]$Status)
-    if ($Status -eq 'Needs manual attention') { return 0 }
+    if ($Status -like 'Needs manual attention*') { return 0 }
     if ($Status -like 'Error*') { return 1 }
     if ($Status -like 'Rejected*') { return 2 }
     if ($Status -like 'Skipped*') { return 3 }
@@ -1241,13 +1316,25 @@ function Get-ReportRows {
 
         $newRel = (Get-NodeNames $node) -join '\'
         $newFull = $Ctx.Prefix + '\' + $newRel
-        $rules = Get-PathRules $node
-        if ($item.Kind -eq 'Dir') { $rules = (@('Empty folder') + @($rules | Where-Object { $_ })) -join ' + ' }
-        if ($item.IsZipTooDeep) { $rules = (@($rules | Where-Object { $_ }) + @('Zip nested more than 3 levels deep, kept as a zip')) -join ' + ' }
+        $notes = New-Object System.Collections.Generic.List[string]
+        if ($item.Kind -eq 'Dir') { $notes.Add('Empty folder') }
+        $pathRules = Get-PathRules $node
+        if ($pathRules) { $notes.Add($pathRules) }
+        $isKeptZip = ($item.Kind -eq 'Container' -and $Ctx.KeepZips)
+        $rebuilt = ($isKeptZip -and (Test-ContainerRebuild $Ctx $node))
+        if ($rebuilt) { $notes.Add('Names inside the zip shortened') }
+        if ($isKeptZip -and $item.UnsafeEntries -gt 0) { $notes.Add('Unsafe entries removed from the zip') }
+        if ($item.IsZipTooDeep) { $notes.Add('Zip nested more than 3 levels deep, kept as it is (names inside not checked)') }
+        if ($item.Note) { $notes.Add($item.Note) }
+        $rules = $notes.ToArray() -join ' + '
+        $innerTooLong = ($item.InnerLongest -gt 0 -and ($newFull.Length + 1 + $item.InnerLongest) -gt $Ctx.Budget)
 
         if ($item.Status) { $status = $item.Status }
+        elseif ($node.Flagged -and (Test-InsideKeptZip $Ctx $node)) { $status = 'Needs manual attention (inside a zip)' }
         elseif ($node.Flagged) { $status = 'Needs manual attention' }
-        elseif ($item.Kind -eq 'Container') { $status = 'Expanded (nested zip)' }
+        elseif ($innerTooLong) { $status = 'Needs manual attention (inside a zip)' }
+        elseif ($item.Kind -eq 'Container' -and -not $Ctx.KeepZips) { $status = 'Expanded (nested zip)' }
+        elseif ($rebuilt) { $status = 'Renamed' }
         elseif ([string]::Equals($newRel, $item.OrigRel, [System.StringComparison]::Ordinal)) { $status = 'OK' }
         else { $status = 'Renamed' }
 
@@ -1263,19 +1350,34 @@ function Get-ReportRows {
 # Apply: copy or extract with the new names
 # ---------------------------------------------------------------------------
 
+function Open-ItemSource {
+    # Opens a source file or zip entry for reading. Max is the most bytes it may
+    # hold (-1 for no limit), which stops a zip entry that lies about its size.
+    param($Ctx, $Item)
+    if ($Item.SourceType -eq 'Fs') {
+        $s = [System.IO.File]::Open($Item.SourcePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        return [pscustomobject]@{ Stream = $s; Max = [long]-1 }
+    }
+    $entry = (Get-OpenArchive $Ctx $Item.ZipPath).Entries[$Item.EntryIndex]
+    return [pscustomobject]@{ Stream = $entry.Open(); Max = [long]$Item.Size }
+}
+
+function New-LogRow {
+    param([string]$Original, [string]$New, $Size, $LastWrite, [string]$Hash, [string]$Result)
+    return [pscustomobject]@{
+        OriginalRelativePath = $Original; NewRelativePath = $New; SizeBytes = $Size
+        LastModified = (Format-LocalTime $LastWrite); SHA256 = $Hash; Result = $Result
+    }
+}
+
 function Copy-ItemToTarget {
     param($Ctx, $Item, [string]$TargetLong)
     $in = $null
     $out = $null
     try {
-        if ($Item.SourceType -eq 'Fs') {
-            $in = [System.IO.File]::Open($Item.SourcePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
-            $max = -1
-        } else {
-            $entry = (Get-OpenArchive $Ctx $Item.ZipPath).Entries[$Item.EntryIndex]
-            $in = $entry.Open()
-            $max = $Item.Size
-        }
+        $src = Open-ItemSource $Ctx $Item
+        $in = $src.Stream
+        $max = $src.Max
         # CreateNew: never overwrite anything that is already there.
         $out = [System.IO.File]::Open($TargetLong, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
         $r = Copy-StreamWithHash -InputStream $in -OutputStream $out -MaxBytes $max
@@ -1294,6 +1396,186 @@ function Copy-ItemToTarget {
     return $r
 }
 
+function Copy-FileVerified {
+    # Copies a file byte for byte, then checks the copy against the source and
+    # against the fingerprint taken when the source was first read.
+    param([string]$SourceLong, [string]$TargetLong, [string]$ExpectedHash, [string]$Label)
+    $in = [System.IO.File]::Open($SourceLong, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    $out = $null
+    try {
+        $out = [System.IO.File]::Open($TargetLong, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        $r = Copy-StreamWithHash -InputStream $in -OutputStream $out -MaxBytes -1
+    } finally {
+        if ($null -ne $out) { $out.Dispose() }
+        $in.Dispose()
+    }
+    $check = Get-FileSha256 $TargetLong
+    if ($check -ne $r.Hash -or ($ExpectedHash -and $r.Hash -ne $ExpectedHash)) {
+        throw ('HASH MISMATCH: {0} was copied with different contents (expected {1}, output {2}). The run was stopped.' -f $Label, $ExpectedHash, $check)
+    }
+    return $r
+}
+
+function Set-SubtreeStatus {
+    # Marks a zip and everything in it, for example when it could not be written.
+    param($Node, [string]$Status)
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push($Node)
+    while ($stack.Count -gt 0) {
+        $n = $stack.Pop()
+        if ($null -ne $n.Item -and -not $n.Item.Status) { $n.Item.Status = $Status }
+        if ($n.IsContainer -and $null -ne $n.DirItem -and -not $n.DirItem.Status) { $n.DirItem.Status = $Status }
+        foreach ($c in $n.Children) { $stack.Push($c) }
+    }
+}
+
+function Add-UnchangedZipLogRow {
+    # Log rows for everything inside a zip that was copied byte for byte. The
+    # zip's own fingerprint shows none of it changed.
+    param($Ctx, $Node, $Rows)
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    foreach ($c in $Node.Children) { $stack.Push($c) }
+    while ($stack.Count -gt 0) {
+        $n = $stack.Pop()
+        $rel = (Get-NodeNames $n) -join '\'
+        if ($n.IsContainer) {
+            $ci = $n.DirItem
+            $Rows.Add((New-LogRow $ci.OrigRel $rel $ci.Size $ci.LastWrite $ci.Hash 'Zip inside a zip, copied unchanged'))
+        } elseif (-not $n.IsDir -and $null -ne $n.Item) {
+            $Rows.Add((New-LogRow $n.Item.OrigRel $rel $n.Item.Size $n.Item.LastWrite '' 'Inside a zip copied unchanged'))
+        }
+        foreach ($c in $n.Children) { $stack.Push($c) }
+    }
+}
+
+function Add-ZipEntryFromFile {
+    param($Archive, [string]$EntryName, [string]$SourceLong, $LastWrite)
+    $e = $Archive.CreateEntry($EntryName, [System.IO.Compression.CompressionLevel]::Optimal)
+    $e.LastWriteTime = Get-ZipSafeDate $LastWrite
+    $in = [System.IO.File]::Open($SourceLong, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    $out = $e.Open()
+    try { return (Copy-StreamWithHash -InputStream $in -OutputStream $out -MaxBytes -1) } finally { $out.Dispose(); $in.Dispose() }
+}
+
+function Write-ContainerZip {
+    # Builds a new zip for a zip kept as a zip, with the shortened names inside.
+    # Folders stay folders, zips inside it stay zips, and every document is
+    # copied unchanged and checked by reading it back. Returns the log rows.
+    param($Ctx, $Node, [string]$TargetLong)
+    $rows = New-Object System.Collections.Generic.List[object]
+    $written = New-Object System.Collections.Generic.List[object]
+    $fs = [System.IO.File]::Open($TargetLong, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    $za = New-Object System.IO.Compression.ZipArchive -ArgumentList @($fs, [System.IO.Compression.ZipArchiveMode]::Create, $false)
+    try {
+        $stack = New-Object System.Collections.Generic.Stack[object]
+        $stack.Push(@($Node, ''))
+        while ($stack.Count -gt 0) {
+            $pair = $stack.Pop()
+            foreach ($child in $pair[0].Children) {
+                $name = Get-NodeName $child
+                if ($pair[1]) { $entryName = $pair[1] + '/' + $name } else { $entryName = $name }
+                $virtualRel = (Get-NodeNames $child) -join '\'
+                if ($child.IsContainer) {
+                    $ci = $child.DirItem
+                    if (Test-ContainerRebuild $Ctx $child) {
+                        $tmp = New-WorkFile $Ctx '.zip'
+                        foreach ($r in (Write-ContainerZip $Ctx $child $tmp)) { $rows.Add($r) }
+                        $h = Add-ZipEntryFromFile $za $entryName $tmp $ci.LastWrite
+                        $result = 'Zip inside a zip, rebuilt with shorter names inside. Original zip SHA256 ' + $ci.Hash
+                    } else {
+                        $h = Add-ZipEntryFromFile $za $entryName $ci.InnerZipPath $ci.LastWrite
+                        if ($h.Hash -ne $ci.Hash) {
+                            throw ('HASH MISMATCH: {0} changed while it was copied (expected {1}, got {2}). The run was stopped.' -f $ci.OrigRel, $ci.Hash, $h.Hash)
+                        }
+                        Add-UnchangedZipLogRow $Ctx $child $rows
+                        $result = 'Zip inside a zip, copied unchanged'
+                    }
+                    $written.Add([pscustomobject]@{ Name = $entryName; Hash = $h.Hash })
+                    $rows.Add((New-LogRow $ci.OrigRel $virtualRel $h.Bytes $ci.LastWrite $h.Hash $result))
+                } elseif ($child.IsDir) {
+                    if ($child.Children.Count -eq 0) {
+                        $e = $za.CreateEntry($entryName + '/')
+                        if ($null -ne $child.DirItem -and $null -ne $child.DirItem.LastWrite) { $e.LastWriteTime = Get-ZipSafeDate $child.DirItem.LastWrite }
+                    } else {
+                        $stack.Push(@($child, $entryName))
+                    }
+                } else {
+                    $item = $child.Item
+                    Update-RunProgress ('Rebuilding a zip: ' + $name)
+                    $e = $za.CreateEntry($entryName, [System.IO.Compression.CompressionLevel]::Optimal)
+                    $e.LastWriteTime = Get-ZipSafeDate $item.LastWrite
+                    $src = Open-ItemSource $Ctx $item
+                    $out = $e.Open()
+                    try { $r = Copy-StreamWithHash -InputStream $src.Stream -OutputStream $out -MaxBytes $src.Max } finally { $out.Dispose(); $src.Stream.Dispose() }
+                    if ($item.SourceType -eq 'Zip' -and $r.Bytes -ne $item.Size) {
+                        throw ('{0} holds {1} bytes but the zip says {2}. The zip may be damaged.' -f $item.OrigRel, $r.Bytes, $item.Size)
+                    }
+                    $item.Hash = $r.Hash
+                    $written.Add([pscustomobject]@{ Name = $entryName; Hash = $r.Hash })
+                    if ($child.Flagged) { $result = 'Added to a rebuilt zip (still too long if unzipped here)' } else { $result = 'Added to a rebuilt zip' }
+                    $rows.Add((New-LogRow $item.OrigRel $virtualRel $r.Bytes $item.LastWrite $r.Hash $result))
+                }
+            }
+        }
+    } finally {
+        $za.Dispose()
+    }
+
+    # Read every entry back and compare fingerprints.
+    $rs = [System.IO.File]::Open($TargetLong, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    $check = New-Object System.IO.Compression.ZipArchive -ArgumentList @($rs, [System.IO.Compression.ZipArchiveMode]::Read, $false, [System.Text.Encoding]::UTF8)
+    try {
+        $byName = New-Object 'System.Collections.Generic.Dictionary[string,object]' -ArgumentList ([System.StringComparer]::Ordinal)
+        foreach ($e in $check.Entries) { $byName[$e.FullName] = $e }
+        foreach ($w in $written) {
+            if (-not $byName.ContainsKey($w.Name)) { throw ('HASH MISMATCH: {0} is missing from the rebuilt zip. The run was stopped.' -f $w.Name) }
+            $s = $byName[$w.Name].Open()
+            try { $got = (Copy-StreamWithHash -InputStream $s -OutputStream $null).Hash } finally { $s.Dispose() }
+            if ($got -ne $w.Hash) {
+                throw ('HASH MISMATCH: {0} in the rebuilt zip differs from the source (source {1}, zip {2}). The run was stopped.' -f $w.Name, $w.Hash, $got)
+            }
+        }
+    } finally {
+        $check.Dispose()
+    }
+    return , $rows.ToArray()
+}
+
+function Write-KeptZip {
+    # Writes a zip found inside the source as a zip: copied byte for byte when
+    # nothing inside needs to change, otherwise rebuilt with the new names.
+    param($Ctx, $Node, [string]$TargetLong, [string]$NewRel)
+    $ci = $Node.DirItem
+    $log = $Ctx.LogRows
+    try {
+        if (Test-ContainerRebuild $Ctx $Node) {
+            Update-RunProgress ('Rebuilding ' + (Get-NodeName $Node) + ' with shorter names inside')
+            $rows = Write-ContainerZip $Ctx $Node $TargetLong
+            if ($null -ne $ci.LastWrite) { [System.IO.File]::SetLastWriteTime($TargetLong, [datetime]$ci.LastWrite) }
+            foreach ($r in $rows) { $log.Add($r) }
+            $fi = New-Object System.IO.FileInfo -ArgumentList $TargetLong
+            $result = 'Zip rebuilt with shorter names inside. The documents in it are unchanged. Original zip SHA256 ' + $ci.Hash
+            if ($Node.Flagged) { $result = 'Copied to Needs attention folder. ' + $result }
+            $log.Add((New-LogRow $ci.OrigRel $NewRel $fi.Length $ci.LastWrite (Get-FileSha256 $TargetLong) $result))
+        } else {
+            Update-RunProgress ('Copying ' + (Get-NodeName $Node))
+            $r = Copy-FileVerified $ci.InnerZipPath $TargetLong $ci.Hash $ci.OrigRel
+            if ($null -ne $ci.LastWrite) { [System.IO.File]::SetLastWriteTime($TargetLong, [datetime]$ci.LastWrite) }
+            if ($Node.Flagged) { $result = 'Copied to Needs attention folder (zip unchanged)' } else { $result = 'Copied (zip unchanged, names inside already fit)' }
+            $log.Add((New-LogRow $ci.OrigRel $NewRel $r.Bytes $ci.LastWrite $r.Hash $result))
+            Add-UnchangedZipLogRow $Ctx $Node $log
+        }
+    } catch {
+        $msg = $_.Exception.Message
+        if ($msg -like 'HASH MISMATCH*') { throw }
+        try { if ([System.IO.File]::Exists($TargetLong)) { [System.IO.File]::Delete($TargetLong) } } catch { }
+        if ($msg -like 'Stopped:*') { throw }
+        Set-SubtreeStatus $Node ('Error - ' + $msg)
+        $log.Add((New-LogRow $ci.OrigRel '' $ci.Size $ci.LastWrite '' ('Error - ' + $msg)))
+        Add-RunWarning $Ctx ('Could not write {0}: {1}' -f $ci.OrigRel, $msg)
+    }
+}
+
 function Get-AttentionName {
     # Files that still do not fit are saved flat in the "Needs attention" folder,
     # with names short enough that File Explorer, Word and Excel can open them
@@ -1304,7 +1586,8 @@ function Get-AttentionName {
     $maxName = [Math]::Max(40, 250 - $rootFull.Length - 1)
     $used = New-Object 'System.Collections.Generic.HashSet[string]' -ArgumentList ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($leaf in $Leaves) {
-        if (-not $leaf.Flagged -or $leaf.IsDir) { continue }
+        if (-not $leaf.Flagged -or (Test-InsideKeptZip $Ctx $leaf)) { continue }
+        if ($leaf.IsDir -and -not ($Ctx.KeepZips -and $leaf.IsContainer)) { continue }
         $stem = $leaf.Base
         $ext = $leaf.Ext
         if (($stem + $ext).Length -gt $maxName - 6) {
@@ -1341,9 +1624,12 @@ function Invoke-ApplyPlan {
     $attentionNames = Get-AttentionName $Ctx $ordered
     $done = 0
     foreach ($leaf in $ordered) {
+        # Anything inside a zip kept as a zip is written when that zip is written.
+        if (Test-InsideKeptZip $Ctx $leaf) { continue }
+        $isKeptZip = ($Ctx.KeepZips -and $leaf.IsContainer)
         if ($leaf.Flagged) {
             # Empty folders that are too long are listed in the report only.
-            if ($leaf.IsDir) { continue }
+            if ($leaf.IsDir -and -not $isKeptZip) { continue }
             $rootLong = $Ctx.AttentionLong
             $names = [string[]]@($attentionNames[$leaf.Order])
         } else {
@@ -1353,6 +1639,12 @@ function Invoke-ApplyPlan {
         $target = Join-PhysicalPath $rootLong $names
         if (-not (Test-PathUnder $target $rootLong) -or $target.Length -le $rootLong.Length) {
             throw ('Refusing to write outside the output folder: {0}' -f $target)
+        }
+        if ($isKeptZip) {
+            [void][System.IO.Directory]::CreateDirectory((Get-ParentPhysicalPath $target))
+            Write-KeptZip $Ctx $leaf $target ($names -join '\')
+            $done++
+            continue
         }
         if ($leaf.IsDir) {
             [void][System.IO.Directory]::CreateDirectory($target)
@@ -1388,7 +1680,7 @@ function Invoke-ApplyPlan {
     }
 
     foreach ($item in $Ctx.Items) {
-        if ($item.Kind -eq 'Container') {
+        if ($item.Kind -eq 'Container' -and -not $Ctx.KeepZips) {
             $log.Add([pscustomobject]@{
                     OriginalRelativePath = $item.OrigRel; NewRelativePath = ((Get-NodeNames $item.Node) -join '\'); SizeBytes = $item.Size
                     LastModified = (Format-LocalTime $item.LastWrite); SHA256 = $item.Hash; Result = 'Zip inside the source, expanded into this folder'
@@ -1429,18 +1721,20 @@ function New-OutputZip {
     $fs = [System.IO.File]::Open($Ctx.ZipLong, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
     $za = New-Object System.IO.Compression.ZipArchive -ArgumentList @($fs, [System.IO.Compression.ZipArchiveMode]::Create, $false)
     try {
-        $ordered = @($Ctx.Leaves | Where-Object { -not $_.Flagged } | Sort-Object -Property @{ Expression = { (Get-NodeNames $_) -join '\' } })
+        $ordered = @($Ctx.Leaves | Where-Object { -not $_.Flagged -and -not (Test-InsideKeptZip $Ctx $_) } | Sort-Object -Property @{ Expression = { (Get-NodeNames $_) -join '\' } })
         foreach ($leaf in $ordered) {
             $names = Get-NodeNames $leaf
-            if ($leaf.IsDir) {
+            $isKeptZip = ($Ctx.KeepZips -and $leaf.IsContainer)
+            if ($leaf.IsDir -and -not $isKeptZip) {
                 $e = $za.CreateEntry((($names -join '/') + '/'))
                 if ($null -ne $leaf.DirItem) { $e.LastWriteTime = Get-ZipSafeDate $leaf.DirItem.LastWrite }
                 continue
             }
-            if ($leaf.Item.Status) { continue }
+            if ($isKeptZip) { $srcItem = $leaf.DirItem } else { $srcItem = $leaf.Item }
+            if ($srcItem.Status) { continue }
             $src = Join-PhysicalPath $Ctx.FilesLong $names
             $e = $za.CreateEntry(($names -join '/'), [System.IO.Compression.CompressionLevel]::Optimal)
-            $e.LastWriteTime = Get-ZipSafeDate $leaf.Item.LastWrite
+            $e.LastWriteTime = Get-ZipSafeDate $srcItem.LastWrite
             $in = [System.IO.File]::Open($src, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
             $es = $e.Open()
             try { $in.CopyTo($es) } finally { $es.Dispose(); $in.Dispose() }
@@ -1558,6 +1852,7 @@ function Invoke-PathShortener {
         [ValidateRange(0, 1000)][int]$SafetyMargin = 10,
         [string]$AbbreviationsCsv = '',
         [switch]$Apply,
+        [ValidateSet('Keep', 'Expand')][string]$NestedZips = 'Keep',
         [switch]$ExpandNestedZips,
         [switch]$CreateZip,
         [ValidateRange(0.0, 100000.0)][double]$MaxTotalSizeGB = 20,
@@ -1569,6 +1864,10 @@ function Invoke-PathShortener {
 
     $script:Quiet = [bool]$Quiet
     $script:Progress = $Progress
+    # Zips found inside the source are kept as zips (with shorter names inside
+    # where needed) unless unpacking was asked for. -ExpandNestedZips is the
+    # older switch for unpacking.
+    if ($ExpandNestedZips) { $NestedZips = 'Expand' }
     Update-RunProgress 'Checking the output folder...'
     $stamp = (Get-Date).ToString('yyyy-MM-dd HHmmss', [System.Globalization.CultureInfo]::InvariantCulture)
 
@@ -1631,7 +1930,8 @@ function Invoke-PathShortener {
         SourceIsZip        = $srcIsFile
         OutputFull         = $outFull
         OutputLong         = $outLong
-        ExpandNestedZips   = [bool]$ExpandNestedZips
+        KeepZips           = ($NestedZips -eq 'Keep')
+        RebuildCache       = @{}
         IncludeSystemFiles = [bool]$IncludeSystemFiles
         MaxTotalSizeGB     = $MaxTotalSizeGB
         MaxTotalBytes      = [long]($MaxTotalSizeGB * 1GB)
@@ -1719,9 +2019,18 @@ function Invoke-PathShortener {
         }
     }
 
-    $processed = @($ctx.Items | Where-Object { $_.Kind -eq 'File' }).Count
+    $processed = @($ctx.Items | Where-Object { $_.Kind -eq 'File' -or ($ctx.KeepZips -and $_.Kind -eq 'Container') }).Count
     $renamed = @($rows | Where-Object { $_.Status -eq 'Renamed' }).Count
-    $flagged = @($rows | Where-Object { $_.Status -eq 'Needs manual attention' }).Count
+    $flagged = @($rows | Where-Object { $_.Status -like 'Needs manual attention*' }).Count
+    $zipsKept = 0
+    $zipsRebuilt = 0
+    if ($ctx.KeepZips) {
+        foreach ($i in $ctx.Items) {
+            if ($i.Kind -ne 'Container' -or $null -eq $i.Node) { continue }
+            $zipsKept++
+            if (Test-ContainerRebuild $ctx $i.Node) { $zipsRebuilt++ }
+        }
+    }
     $skipped = @($rows | Where-Object { $_.Status -like 'Skipped*' }).Count
     $rejected = @($rows | Where-Object { $_.Status -like 'Rejected*' }).Count
     $errors = @($rows | Where-Object { $_.Status -like 'Error*' }).Count
@@ -1741,6 +2050,7 @@ function Invoke-PathShortener {
         Write-Info (' Needing attention:    0')
     }
     if ($expanded -gt 0) { Write-Info (' Zips inside expanded: {0}' -f $expanded) }
+    if ($zipsKept -gt 0) { Write-Info (' Zips inside kept as zips: {0}  ({1} with shorter names inside)' -f $zipsKept, $zipsRebuilt) }
     if ($skipped -gt 0) { Write-Info (' Skipped:              {0}  (see the report for why)' -f $skipped) }
     if ($rejected -gt 0) { Write-Info (' Rejected as unsafe:   {0}  (entries that tried to write outside the output folder)' -f $rejected) 'Yellow' }
     if ($errors -gt 0) { Write-Info (' Errors:               {0}' -f $errors) 'Red' }
@@ -1755,6 +2065,9 @@ function Invoke-PathShortener {
 
     return [pscustomobject]@{
         Mode            = $(if ($Apply) { 'Apply' } else { 'DryRun' })
+        NestedZips      = $NestedZips
+        ZipsKept        = $zipsKept
+        ZipsRebuilt     = $zipsRebuilt
         Source          = $srcFull
         DestinationPrefix = $prefix
         Budget          = $budget

@@ -35,8 +35,14 @@
     Actually copy or extract the files. Without this switch nothing is written
     except the report.
 
+.PARAMETER NestedZips
+    What to do with zip files found inside the source (looked at up to 3
+    levels deep). Keep (the default) leaves them as zip files, copied byte for
+    byte, or rebuilt with shorter names inside if the paths inside would be too
+    long once unzipped where they sit. Expand unpacks them into folders.
+
 .PARAMETER ExpandNestedZips
-    Also unpack zips found inside the source, up to 3 levels deep.
+    Older switch, the same as -NestedZips Expand.
 
 .PARAMETER CreateZip
     With -Apply, also make a new zip of the renamed files.
@@ -58,7 +64,7 @@
     Dry run. Writes a report to C:\CL\Out and changes nothing.
 
 .EXAMPLE
-    .\Shorten-LongPaths.ps1 -Source 'C:\Users\jsmith\Downloads\Smith docs.zip' -DestinationPrefix 'C:\Users\jsmith\CL\Matters - Documents\Smith Pty Ltd' -AbbreviationsCsv ..\Abbreviations.csv -ExpandNestedZips -Apply
+    .\Shorten-LongPaths.ps1 -Source 'C:\Users\jsmith\Downloads\Smith docs.zip' -DestinationPrefix 'C:\Users\jsmith\CL\Matters - Documents\Smith Pty Ltd' -AbbreviationsCsv ..\Abbreviations.csv -Apply
 
     Extracts the zip into C:\CL\Out\Smith docs with shortened names and writes
     the evidence log.
@@ -72,6 +78,7 @@ param(
     [int]$SafetyMargin = 10,
     [string]$AbbreviationsCsv = '',
     [switch]$Apply,
+    [ValidateSet('Keep', 'Expand')][string]$NestedZips = 'Keep',
     [switch]$ExpandNestedZips,
     [switch]$CreateZip,
     [double]$MaxTotalSizeGB = 20,

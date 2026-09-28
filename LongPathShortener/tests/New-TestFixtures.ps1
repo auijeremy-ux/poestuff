@@ -11,8 +11,10 @@
                       inside the folder.
       Source.zip      the same tree plus illegal characters, names that differ
                       only in case, zip slip entries, an entry marked as
-                      encrypted, zips nested 4 levels deep, Mac clutter, and
-                      accented names stored the Windows way and the Mac way.
+                      encrypted, zips nested 4 levels deep, Mac clutter,
+                      accented names stored the Windows way and the Mac way,
+                      a zip with long names inside (and a zip inside that),
+                      and a zip holding a password-protected file.
 
     Returns an object describing what was created.
 #>
@@ -138,11 +140,13 @@ if (-not $isWin) {
 # ---------------------------------------------------------------------------
 
 function New-ZipBytes {
-    param($Entries)
+    # -Stored makes a zip without compression, so it can be told apart from a
+    # zip the tool rebuilds (the tool compresses).
+    param($Entries, [switch]$Stored)
     $ms = New-Object System.IO.MemoryStream
     $za = New-Object System.IO.Compression.ZipArchive -ArgumentList @($ms, [System.IO.Compression.ZipArchiveMode]::Create, $true)
     foreach ($e in $Entries) {
-        $ze = $za.CreateEntry($e.Name)
+        if ($Stored) { $ze = $za.CreateEntry($e.Name, [System.IO.Compression.CompressionLevel]::NoCompression) } else { $ze = $za.CreateEntry($e.Name) }
         $ze.LastWriteTime = New-Object System.DateTimeOffset -ArgumentList ([datetime]$e.Date)
         if ($null -ne $e.Bytes) {
             $s = $ze.Open()
@@ -215,8 +219,26 @@ function Set-ZipEntryNameBytes {
 $innerForFolder = New-ZipBytes @(
     (New-ZipEntrySpec 'Inner letter.pdf' (New-RandomBytes 1500) $null),
     (New-ZipEntrySpec 'Sub folder/Inner note.txt' (New-RandomBytes 300) $null)
-)
+) -Stored
 Write-FixtureFile @('Nested', 'Inner documents.zip') $innerForFolder (Get-NextDate)
+
+# A zip with deep folders and long names inside, which has its own zip inside
+# with long names, an empty folder, and an unsafe entry. Used in both fixtures.
+$bundleInner = New-ZipBytes @(
+    (New-ZipEntrySpec 'Correspondence and Construction Records for the Period of the Project from Commencement to Practical Completion/001 Letter of demand regarding the outstanding payment claims for the variations to the contract.docx' (New-RandomBytes 1200) $null),
+    (New-ZipEntrySpec 'Inner short.txt' (New-RandomBytes 150) $null)
+)
+$b1 = 'Smith Pty Ltd Correspondence with the Builder and the Certifier about the Construction Defects'
+$b2 = 'Expert Reports and Photographs of the Defects for the Adjudication Application and Response'
+$clientBundle = New-ZipBytes @(
+    (New-ZipEntrySpec 'Short note.txt' (New-RandomBytes 180) $null),
+    (New-ZipEntrySpec ($b1 + '/' + $b2 + '/2024-05-01 Report of the independent building expert regarding the waterproofing defects.pdf') (New-RandomBytes 2500) $null),
+    (New-ZipEntrySpec ($b1 + '/Summary of the defects claimed by the owner against the builder under the building contract.docx') (New-RandomBytes 1700) $null),
+    (New-ZipEntrySpec 'Empty inside/' $null $null),
+    (New-ZipEntrySpec '../escape.txt' (New-RandomBytes 40) $null),
+    (New-ZipEntrySpec 'Inner bundle.zip' $bundleInner $null)
+)
+Write-FixtureFile @('Nested', 'Client bundle.zip') $clientBundle (Get-NextDate)
 
 # ---------------------------------------------------------------------------
 # Zip fixture
@@ -228,6 +250,13 @@ $level2 = New-ZipBytes @((New-ZipEntrySpec 'L2 file.txt' (New-RandomBytes 200) $
 $level1 = New-ZipBytes @((New-ZipEntrySpec 'L1 file.txt' (New-RandomBytes 200) $null), (New-ZipEntrySpec 'Level2.zip' $level2 $null), (New-ZipEntrySpec 'MXXller statement.txt' (New-RandomBytes 200) $null))
 # "Mueller" with u-umlaut as unmarked UTF-8 (C3 BC), as Mac tools write it.
 Set-ZipEntryNameBytes $level1 'MXXller statement.txt' ([byte[]](@(0x4D, 0xC3, 0xBC) + [System.Text.Encoding]::ASCII.GetBytes('ller statement.txt')))
+
+# A zip with a password-protected file inside and a long path inside.
+$lockedBundle = New-ZipBytes @(
+    (New-ZipEntrySpec 'Secret statement.pdf' (New-RandomBytes 600) $null),
+    (New-ZipEntrySpec 'A very long folder name that goes on and on about the matter of Smith Pty Ltd v Jones Building/Open note that also has a rather long name for testing the password protected case.txt' (New-RandomBytes 300) $null)
+)
+Set-ZipEntryEncryptedFlag $lockedBundle 'Secret statement.pdf'
 
 $zipSlip = @('../../evil-1.txt', 'safe/../../evil-2.txt', '/tmp/evil-3.txt', 'C:/Windows/evil-4.txt', 'C:\evil-5.txt')
 $encrypted = 'Confidential/Encrypted statement.pdf'
@@ -244,6 +273,8 @@ $specs.Add((New-ZipEntrySpec 'LPT1.docx' (New-RandomBytes 100) $null))
 $specs.Add((New-ZipEntrySpec 'Windows style\sub folder\file.txt' (New-RandomBytes 100) $null))
 $specs.Add((New-ZipEntrySpec $encrypted (New-RandomBytes 700) $null))
 $specs.Add((New-ZipEntrySpec 'Nested/Level1.zip' $level1 $null))
+$specs.Add((New-ZipEntrySpec 'Nested/Client bundle.zip' $clientBundle $null))
+$specs.Add((New-ZipEntrySpec 'Nested/Locked bundle.zip' $lockedBundle $null))
 $specs.Add((New-ZipEntrySpec '__MACOSX/Correspondence/._Letter.pdf' (New-RandomBytes 50) $null))
 foreach ($z in $zipSlip) { $specs.Add((New-ZipEntrySpec $z (New-RandomBytes 50) $null)) }
 
@@ -259,6 +290,10 @@ Set-ZipEntryNameBytes $zipBytes 'Correspondence/CafX notes.txt' ([byte[]]([Syste
     ZipPath         = $zipPath
     ZipSlipEntries  = $zipSlip
     EncryptedEntry  = $encrypted
+    ClientBundle    = 'Nested\Client bundle.zip'
+    LockedBundle    = 'Nested\Locked bundle.zip'
+    UnchangedZip    = 'Nested\Level1.zip'
+    UnsafeInsideZip = 'Nested\Client bundle.zip\..\escape.txt'
     DeepestLevels   = $deep.Count
     LongestName     = (@($deep) + @($common | ForEach-Object { $_.Segments[-1] }) | Measure-Object -Property Length -Maximum).Maximum
 }

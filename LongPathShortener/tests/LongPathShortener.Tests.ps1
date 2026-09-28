@@ -468,6 +468,155 @@ Describe 'Folder source' {
 }
 
 # ---------------------------------------------------------------------------
+# Zips inside zips, kept as zips (the default)
+# ---------------------------------------------------------------------------
+
+function Get-ZipEntryNames {
+    param([string]$ZipFile)
+    $fs = [System.IO.File]::Open((ConvertTo-TestLongPath $ZipFile), 'Open', 'Read', 'Read')
+    $za = New-Object System.IO.Compression.ZipArchive -ArgumentList @($fs, [System.IO.Compression.ZipArchiveMode]::Read)
+    try { return @($za.Entries | ForEach-Object { $_.FullName }) } finally { $za.Dispose() }
+}
+
+Describe 'Zips inside zips, kept as zips (the default)' {
+    $zipLong = ConvertTo-TestLongPath $fx.ZipPath
+    $zipHashBefore = Get-TestFileSha256 $fx.ZipPath
+    $sourceMap = New-OrdinalMap
+    Add-ZipEntryInfo ([System.IO.File]::ReadAllBytes($zipLong)) '' $sourceMap
+
+    $out = $workRoot + $sep + 'out-keep'
+    $res = Invoke-PathShortener -Source $fx.ZipPath -OutputFolder $out -DestinationPrefix $prefix -AbbreviationsCsv $abbr -CreateZip -Apply -AllowSyncedOutput -Quiet
+    $outTree = @(Get-TestTree $res.FilesFolder)
+    $outRels = @($outTree | ForEach-Object { $_.Rel })
+    $bundleOut = @($outTree | Where-Object { $_.Rel -like 'Nested\Client bundle*.zip' })
+    $bundleMap = New-OrdinalMap
+    if ($bundleOut.Count -eq 1) { Add-ZipEntryInfo ([System.IO.File]::ReadAllBytes($bundleOut[0].Full)) $bundleOut[0].Rel $bundleMap }
+    $added = @($res.LogRows | Where-Object { $_.Result -like 'Added to a rebuilt zip*' })
+
+    It 'keeps zips found inside as zip files, where they were' {
+        $res.NestedZips | Should Be 'Keep'
+        ($outRels -contains $fx.UnchangedZip) | Should Be $true
+        ($outRels -contains $fx.LockedBundle) | Should Be $true
+        $bundleOut.Count | Should Be 1
+        @($outTree | Where-Object { $_.IsDir -and $_.Rel -like 'Nested\*' }).Count | Should Be 0
+    }
+
+    It 'copies a zip byte for byte when nothing inside needs to change' {
+        $unchanged = @($outTree | Where-Object { $_.Rel -eq $fx.UnchangedZip })
+        Get-TestFileSha256 $unchanged[0].Full | Should Be $sourceMap[$fx.UnchangedZip].Hash
+    }
+
+    It 'rebuilds a zip whose paths would be too long once unzipped where it sits, and they now fit' {
+        $bundleMap.Count | Should BeGreaterThan 4
+        foreach ($k in $bundleMap.Keys) { ($prefixNoSlash + '\' + $k).Length | Should Not BeGreaterThan $budget }
+        @($bundleMap.Keys | Where-Object { $_ -like '*\Inner bundle.zip\*' }).Count | Should Be 2
+    }
+
+    It 'keeps the folder structure inside rebuilt zips, including empty folders' {
+        $names = Get-ZipEntryNames $bundleOut[0].Full
+        @($names | Where-Object { $_ -eq 'Empty inside/' }).Count | Should Be 1
+        @($names | Where-Object { $_ -like '*/*/2024-05-01 *.pdf' }).Count | Should Be 1
+        @($names | Where-Object { $_ -eq 'Inner bundle.zip' }).Count | Should Be 1
+    }
+
+    It 'leaves every document inside rebuilt zips unchanged, with its date' {
+        $added.Count | Should Be 5
+        foreach ($row in $added) {
+            $sourceMap.ContainsKey($row.OriginalRelativePath) | Should Be $true
+            $bundleMap.ContainsKey($row.NewRelativePath) | Should Be $true
+            $row.SHA256 | Should Be $sourceMap[$row.OriginalRelativePath].Hash
+            $bundleMap[$row.NewRelativePath].Hash | Should Be $row.SHA256
+            [Math]::Abs(($bundleMap[$row.NewRelativePath].Time - $sourceMap[$row.OriginalRelativePath].Time).TotalSeconds) | Should Not BeGreaterThan 2
+        }
+    }
+
+    It 'keeps extensions and leading dates and document numbers inside rebuilt zips' {
+        foreach ($row in $added) {
+            $old = Get-LeafName $row.OriginalRelativePath
+            $new = Get-LeafName $row.NewRelativePath
+            Get-TestExtension $new | Should Be (Get-TestExtension $old)
+            if ($old -match $datePattern) { $new.StartsWith($Matches[0]) | Should Be $true }
+        }
+        @($added | Where-Object { (Get-LeafName $_.OriginalRelativePath) -match $datePattern }).Count | Should Be 2
+    }
+
+    It 'records the old and new fingerprint of each rebuilt zip in the log' {
+        $row = @($res.LogRows | Where-Object { $_.OriginalRelativePath -eq $fx.ClientBundle })
+        $row.Count | Should Be 1
+        $row[0].Result | Should Match ('Original zip SHA256 ' + $sourceMap[$fx.ClientBundle].Hash)
+        $row[0].SHA256 | Should Be (Get-TestFileSha256 $bundleOut[0].Full)
+        $inner = @($res.LogRows | Where-Object { $_.OriginalRelativePath -eq ($fx.ClientBundle + '\Inner bundle.zip') })
+        $inner[0].Result | Should Match ('Original zip SHA256 ' + $sourceMap[$fx.ClientBundle + '\Inner bundle.zip'].Hash)
+    }
+
+    It 'drops unsafe entries from rebuilt zips and reports them' {
+        $row = @($res.Rows | Where-Object { $_.OriginalPath -eq ($prefixNoSlash + '\' + $fx.UnsafeInsideZip) })
+        $row.Count | Should Be 1
+        $row[0].Status | Should Be 'Rejected - unsafe path (zip slip)'
+        @(Get-ZipEntryNames $bundleOut[0].Full | Where-Object { $_ -match '(^|/)\.\.(/|$)' -or $_ -like '*escape.txt' }).Count | Should Be 0
+        @(Get-TestTree $workRoot | Where-Object { $_.Rel -like '*escape.txt' }).Count | Should Be 0
+    }
+
+    It 'keeps a zip with password-protected files exactly as it was, and flags it' {
+        $locked = @($outTree | Where-Object { $_.Rel -eq $fx.LockedBundle })
+        Get-TestFileSha256 $locked[0].Full | Should Be $sourceMap[$fx.LockedBundle].Hash
+        $row = @($res.Rows | Where-Object { $_.OriginalPath -eq ($prefixNoSlash + '\' + $fx.LockedBundle) })
+        $row[0].Status | Should Be 'Needs manual attention (inside a zip)'
+        $row[0].RulesApplied | Should Match 'password-protected'
+    }
+
+    It 'every file on disk fits within the limit including the destination prefix' {
+        foreach ($e in $outTree) { ($prefixNoSlash + '\' + $e.Rel).Length | Should Not BeGreaterThan $budget }
+    }
+
+    It 'every renamed or unchanged row in the report fits, including paths inside zips' {
+        $fitting = @($res.Rows | Where-Object { $_.Status -eq 'OK' -or $_.Status -eq 'Renamed' })
+        @($fitting | Where-Object { $_.NewPath -like '*.zip\*' }).Count | Should BeGreaterThan 8
+        foreach ($r in $fitting) { [int]$r.NewLength | Should Not BeGreaterThan $budget }
+    }
+
+    It 'puts the kept zips in the new zip of the renamed files' {
+        $zipMap = New-OrdinalMap
+        Add-ZipEntryInfo ([System.IO.File]::ReadAllBytes((ConvertTo-TestLongPath $res.ZipPath))) '' $zipMap
+        $zipMap.ContainsKey($fx.UnchangedZip) | Should Be $true
+        $zipMap[$fx.UnchangedZip].Hash | Should Be $sourceMap[$fx.UnchangedZip].Hash
+    }
+
+    It 'leaves the original zip untouched' {
+        Get-TestFileSha256 $fx.ZipPath | Should Be $zipHashBefore
+    }
+}
+
+Describe 'Zips inside a folder, kept as zips' {
+    $before = Get-TreeSnapshot $fx.FolderPath
+    $out = $workRoot + $sep + 'out-keep-folder'
+    $res = Invoke-PathShortener -Source $fx.FolderPath -OutputFolder $out -DestinationPrefix $prefix -AbbreviationsCsv $abbr -Apply -AllowSyncedOutput -Quiet
+    $after = Get-TreeSnapshot $fx.FolderPath
+    $outTree = @(Get-TestTree $res.FilesFolder)
+
+    It 'copies a zip byte for byte when nothing inside needs to change' {
+        $kept = @($outTree | Where-Object { $_.Rel -eq 'Nested\Inner documents.zip' })
+        $kept.Count | Should Be 1
+        Get-TestFileSha256 $kept[0].Full | Should Be (Get-TestFileSha256 ($fx.FolderPath + $sep + 'Nested' + $sep + 'Inner documents.zip'))
+        $row = @($res.LogRows | Where-Object { $_.OriginalRelativePath -eq 'Nested\Inner documents.zip' })
+        $row[0].Result | Should BeLike 'Copied (zip unchanged*'
+    }
+
+    It 'rebuilds a zip with long names inside so they fit once unzipped where it sits' {
+        $bundle = @($outTree | Where-Object { $_.Rel -like 'Nested\Client bundle*.zip' })
+        $bundle.Count | Should Be 1
+        $map = New-OrdinalMap
+        Add-ZipEntryInfo ([System.IO.File]::ReadAllBytes($bundle[0].Full)) $bundle[0].Rel $map
+        $map.Count | Should BeGreaterThan 4
+        foreach ($k in $map.Keys) { ($prefixNoSlash + '\' + $k).Length | Should Not BeGreaterThan $budget }
+    }
+
+    It 'leaves the source folder untouched' {
+        $after | Should Be $before
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Safety checks
 # ---------------------------------------------------------------------------
 

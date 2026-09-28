@@ -83,7 +83,8 @@ The report has one row for every file, and for any empty folders. Problems are l
 | OK | Already fits. Name unchanged. |
 | Renamed | Now fits. |
 | Needs manual attention | Still too long after all the shortening the tool is allowed to do. See "Files that need manual attention". |
-| Expanded (nested zip) | A zip inside the zip (or folder). It was unpacked into a folder with the same name, without `.zip`. |
+| Needs manual attention (inside a zip) | Something inside a zip (found inside the client's zip or folder) would still be too long if that zip were unzipped where it sits. The zip itself is fine to upload. See "Zips inside zips". |
+| Expanded (nested zip) | Only when unpacking is turned on in Settings. A zip inside the zip (or folder) was unpacked into a folder with the same name, without `.zip`. |
 | Skipped - system file | Mac or Windows housekeeping, not a document: `__MACOSX` folders, `.DS_Store`, `Thumbs.db`, `desktop.ini`. |
 | Skipped - encrypted | A password-protected file inside the zip. See "Password-protected files". |
 | Skipped - online-only file | The file is in OneDrive but not downloaded to this computer, and the tool will not download it. Right-click the folder, choose **Always keep on this device**, wait for it to download, then run the tool again. |
@@ -108,7 +109,19 @@ Rules 2 to 6 only touch names on a path that is too long. Every other name stays
 
 If two names end up the same, the later one gets ` (2)`, ` (3)` and so on. Windows ignores capitals, so `Letter.pdf` and `LETTER.pdf` count as the same name.
 
-Zips inside the zip become folders, up to 3 levels deep. Any deeper than that are copied as zip files.
+## Zips inside zips
+
+Clients often put zip files inside their zip or folder, sometimes several levels deep. The tool leaves these as zip files, in the same place, so the structure you receive is the structure you upload. It still looks inside them (up to 3 levels deep) and works out how long every path inside would be if that zip were later unzipped where it sits.
+
+- **If everything inside already fits**, the zip is copied exactly as it was, byte for byte. Only its own file name can change, if the path to it is too long.
+- **If something inside is too long**, the zip is rebuilt with the same folders (including empty ones), the same zips inside it and the same documents, but with shorter names where needed. The same rules apply inside as outside. Every document is fingerprinted and checked, and keeps its date. Unsafe entries (see "Rejected - unsafe path") are left out of the rebuilt zip.
+- **If a zip holds password-protected files**, it cannot be rebuilt without losing them, so it is copied exactly as it was. If the names inside are too long, it is marked **Needs manual attention (inside a zip)**.
+
+In the report, a file inside one of these zips shows a path running through the zip's name, for example `Nested\Client bundle.zip\Reports\Letter.pdf`. The length counts the zip's name as if it were a folder, which is where the file would land if the zip were unzipped there.
+
+Zips more than 3 levels deep are copied as they are, without looking inside.
+
+If you would rather have zips inside unpacked into ordinary folders, tick **Unpack zip files found inside into folders** in Settings.
 
 ## Files that need manual attention
 
@@ -131,13 +144,18 @@ The log is the firm's record that only names changed, never contents. Keep it wi
 | Column | What it means |
 | --- | --- |
 | OriginalRelativePath | The file's path inside the zip or folder as the client sent it. |
-| NewRelativePath | The file's path inside the output folder. For files that need attention, this is the name in the Needs attention folder. |
+| NewRelativePath | The file's path inside the output folder. For files that need attention, this is the name in the Needs attention folder. For a file inside a zip, the path runs through the zip's name. |
 | SizeBytes | File size. |
 | LastModified | The file's own last-modified date, in the local time of the computer that ran the tool. The copy keeps this date. |
 | SHA256 | The file's fingerprint. Identical fingerprints mean identical contents. |
-| Result | Copied, Copied to Needs attention folder, Skipped, Rejected or Error, with the reason. |
+| Result | Copied, Copied to Needs attention folder, Skipped, Rejected or Error, with the reason. For zips inside zips, see below. |
 
 The first row is the fingerprint of the original zip itself. Zips inside zips, skipped items and rejected items all have rows too, so the log accounts for everything the client sent.
+
+For zips inside the client's zip or folder:
+
+- A zip copied as it was says **Copied (zip unchanged...)**. Its fingerprint matches the client's original, which shows nothing inside changed. The files inside are listed as **Inside a zip copied unchanged**.
+- A rebuilt zip says **Zip rebuilt with shorter names inside** and gives the fingerprint of the client's original zip as well as the new one. Each document inside has its own row, **Added to a rebuilt zip**, with its fingerprint. That fingerprint was taken from the client's copy and checked again in the new zip, so it shows the document itself did not change.
 
 To check a file's fingerprint later, for example after it has been uploaded and downloaded again, open PowerShell and run:
 
@@ -149,7 +167,9 @@ The Hash shown should match the SHA256 column in the log.
 
 ## Password-protected files
 
-The tool cannot open password-protected files inside a zip. It lists them as **Skipped - encrypted** and leaves them out. To get them, double-click the original zip in File Explorer, open the file and enter the password the client gave you. If Windows cannot open it, ask IT.
+The tool cannot open password-protected files inside a zip. If they are in the client's zip itself, it lists them as **Skipped - encrypted** and leaves them out. To get them, double-click the original zip in File Explorer, open the file and enter the password the client gave you. If Windows cannot open it, ask IT.
+
+If they are inside a zip that was itself inside the client's zip or folder, nothing is left out: that whole zip is copied exactly as it was (see "Zips inside zips").
 
 ## Changing the settings
 
@@ -158,7 +178,7 @@ Click **Settings...** in the app to change:
 - the output folder (default `C:\CL\Out`)
 - the path limit (default 218) and safety margin (default 10)
 - the abbreviations file
-- whether zips inside zips are unpacked (default yes)
+- whether zip files found inside are unpacked into folders (default no, they stay as zips)
 - whether a new zip of the renamed files is also made (default no)
 - whether Mac and Windows housekeeping files are kept (default no)
 
@@ -212,14 +232,14 @@ The text version has its own settings at the top of `engine\Start-Interactive.ps
 ```powershell
 .\engine\Shorten-LongPaths.ps1 -Source 'C:\Users\jsmith\Downloads\Smith docs.zip' `
     -DestinationPrefix 'C:\Users\jsmith\CL\Matters - Documents\Smith Pty Ltd' `
-    -AbbreviationsCsv .\Abbreviations.csv -ExpandNestedZips -Apply
+    -AbbreviationsCsv .\Abbreviations.csv -Apply
 ```
 
-Without `-Apply` it is a dry run. Other switches: `-OutputFolder`, `-MaxPathLength`, `-SafetyMargin`, `-CreateZip`, `-MaxTotalSizeGB`, `-AllowSyncedOutput`, `-IncludeSystemFiles`.
+Without `-Apply` it is a dry run. Other switches: `-OutputFolder`, `-MaxPathLength`, `-SafetyMargin`, `-NestedZips Keep|Expand` (default Keep), `-CreateZip`, `-MaxTotalSizeGB`, `-AllowSyncedOutput`, `-IncludeSystemFiles`. The older `-ExpandNestedZips` switch still works and means `-NestedZips Expand`.
 
 **Long paths.** All file access uses .NET `System.IO` with the `\\?\` prefix (`\\?\UNC\` for network paths). This bypasses the 260 character limit without the LongPathsEnabled registry setting. PowerShell cmdlets such as Get-ChildItem and Copy-Item are not used for file work. At startup the tool creates, reads and deletes a path of more than 300 characters in the output folder. If that fails it stops before touching anything.
 
-**Zips.** Each entry is streamed straight from the zip to its shortened output path, so long original names never touch the disk. Zips inside zips are copied to a short temporary file under the output folder (`_work-xxxxxxxx`), which is deleted at the end. Entry dates are copied onto the extracted files. Entry names not marked as UTF-8 are read as UTF-8 if they are valid UTF-8 (Mac zips), otherwise in the OEM code page (zips made by Windows Explorer).
+**Zips.** Each entry is streamed straight from the zip to its shortened output path, so long original names never touch the disk. Zips inside zips are copied to a short temporary file under the output folder (`_work-xxxxxxxx`) so they can be read, and that folder is deleted at the end. By default they are then kept as zips: copied byte for byte (and checked against their original fingerprint) when nothing inside needs to change, otherwise rebuilt entry by entry with every entry read back and compared before the run moves on. A zip holding encrypted entries is never rebuilt, because System.IO.Compression cannot copy encrypted data. Entry dates are copied onto the extracted files. Entry names not marked as UTF-8 are read as UTF-8 if they are valid UTF-8 (Mac zips), otherwise in the OEM code page (zips made by Windows Explorer).
 
 **Security.**
 
@@ -243,7 +263,7 @@ Without `-Apply` it is a dry run. Other switches: `-OutputFolder`, `-MaxPathLeng
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
 ```
 
-This uses the Pester 3.4 that ships with Windows PowerShell 5.1 and only synthetic data. The data is generated under `%TEMP%` and deleted afterwards. Set `LPS_KEEP_TEST_FILES=1` to keep it. The fixtures include a 12-level tree with names over 100 characters, reserved names, illegal characters, names that collide once shortened, dated file names, zips nested four deep, zip slip entries, an entry marked as encrypted and accented names.
+This uses the Pester 3.4 that ships with Windows PowerShell 5.1 and only synthetic data. The data is generated under `%TEMP%` and deleted afterwards. Set `LPS_KEEP_TEST_FILES=1` to keep it. The fixtures include a 12-level tree with names over 100 characters, reserved names, illegal characters, names that collide once shortened, dated file names, zips nested four deep, a zip with long names inside (and a zip inside that), a zip holding an encrypted entry, zip slip entries, an entry marked as encrypted and accented names.
 
 There are two test files. `LongPathShortener.Tests.ps1` covers the renaming, copying and safety logic. `LongPathShortener.App.Tests.ps1` covers the app's settings, results table, filter, background running and the Stop button. It also checks the app window script statically: it must parse, and every command and variable it uses must exist.
 

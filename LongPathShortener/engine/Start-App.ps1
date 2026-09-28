@@ -408,7 +408,7 @@ try {
         $parts = @(
             $txtSource.Text.Trim().Trim('"'), $cmbDest.Text.Trim().Trim('"'),
             $settings.OutputFolder, $settings.MaxPathLength, $settings.SafetyMargin,
-            $settings.ExpandNestedZips, $settings.IncludeSystemFiles, $settings.AbbreviationsCsv
+            $settings.UnpackNestedZips, $settings.IncludeSystemFiles, $settings.AbbreviationsCsv
         )
         return ($parts -join '|')
     }
@@ -502,7 +502,7 @@ try {
             OutputFolder       = [string]$settings.OutputFolder
             MaxPathLength      = [int]$settings.MaxPathLength
             SafetyMargin       = [int]$settings.SafetyMargin
-            ExpandNestedZips   = [bool]$settings.ExpandNestedZips
+            NestedZips         = $(if ($settings.UnpackNestedZips) { 'Expand' } else { 'Keep' })
             IncludeSystemFiles = [bool]$settings.IncludeSystemFiles
             AllowSyncedOutput  = [bool]($syncMatch -ne '')
         }
@@ -557,8 +557,11 @@ try {
         $state.OutputPath = [string]$Result.FilesFolder
         $lblStatus.Text = 'Finished.'
         $msg = "Finished.`n`nUpload the CONTENTS of this folder to the SharePoint folder:`n    {0}" -f $Result.FilesFolder
+        if ([int]$Result.FilesFlagged -gt 0) {
+            $msg += "`n`n{0} file(s) are still too long. They are marked in red in the list. Sort these out by hand before uploading them (see Help)." -f $Result.FilesFlagged
+        }
         if ($Result.AttentionFolder) {
-            $msg += "`n`n{0} file(s) are still too long. They are in:`n    {1}`nSort these out by hand before uploading them (see Help)." -f $Result.FilesFlagged, $Result.AttentionFolder
+            $msg += "`n`nFiles that could be taken out are in:`n    {0}" -f $Result.AttentionFolder
         }
         if ([int]$Result.Errors -gt 0) {
             $msg += "`n`n{0} file(s) could not be copied. They are marked Error in the list." -f $Result.Errors
@@ -667,9 +670,9 @@ try {
         $btnAbbr = New-UiButton 'Browse...' 90
 
         $chkNested = New-Object System.Windows.Forms.CheckBox
-        $chkNested.Text = 'Unpack zip files found inside the zip or folder (up to 3 levels deep)'
+        $chkNested.Text = 'Unpack zip files found inside into folders, instead of keeping them as zips'
         $chkNested.AutoSize = $true
-        $chkNested.Checked = [bool]$settings.ExpandNestedZips
+        $chkNested.Checked = [bool]$settings.UnpackNestedZips
         $chkZip = New-Object System.Windows.Forms.CheckBox
         $chkZip.Text = 'Also make a new zip of the renamed files'
         $chkZip.AutoSize = $true
@@ -743,7 +746,7 @@ try {
                     $numMax.Value = [decimal]$def.MaxPathLength
                     $numMargin.Value = [decimal]$def.SafetyMargin
                     $txtAbbr.Text = $def.AbbreviationsCsv
-                    $chkNested.Checked = [bool]$def.ExpandNestedZips
+                    $chkNested.Checked = [bool]$def.UnpackNestedZips
                     $chkZip.Checked = [bool]$def.CreateZip
                     $chkSystem.Checked = [bool]$def.IncludeSystemFiles
                 }
@@ -767,7 +770,7 @@ try {
             $settings.MaxPathLength = [int]$numMax.Value
             $settings.SafetyMargin = [int]$numMargin.Value
             $settings.AbbreviationsCsv = $txtAbbr.Text.Trim().Trim('"')
-            $settings.ExpandNestedZips = [bool]$chkNested.Checked
+            $settings.UnpackNestedZips = [bool]$chkNested.Checked
             $settings.CreateZip = [bool]$chkZip.Checked
             $settings.IncludeSystemFiles = [bool]$chkSystem.Checked
             Save-AppSettings $settings $settingsPath
